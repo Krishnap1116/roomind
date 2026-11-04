@@ -40,7 +40,7 @@ Every answer, memory decision, brief, dissent verdict, red-team attack, and team
 
 1. **Clone:**
    ```bash
-   git clone https://github.com/Krishnapriyankaponnaganti/roomind.git
+   git clone https://github.com/Krishnap1116/roomind.git
    cd roomind
    ```
 2. **Install:**
@@ -62,7 +62,7 @@ Built Oct 26 – Nov 4, 2026, during the hackathon, in this repo's commit histor
 
 ## Team
 
-Solo Indie build — [Krishnapriyankaponnaganti](https://github.com/Krishnapriyankaponnaganti).
+Solo Indie build — [Krishnap1116](https://github.com/Krishnap1116).
 
 ## Acknowledgements
 
