@@ -283,7 +283,7 @@ def test_side_pages_and_solo(client):
     assert f"const PARENT='{rid}'" in owner
     assert "← Main" in owner and "Report to main" in owner
     assert "Single link" not in owner and "Team link" not in owner
-    assert "sech>Public link</div>" in owner
+    assert "sech>Read-only link</div>" in owner
     assert "Invite links" not in owner
     ot = client.post(f"/rooms/{sid}/open-side",
                      params={"ptoken": otok}).json()["token"]

@@ -205,7 +205,7 @@ def test_room_tabs_and_plain_labels(client):
                    "Exam never run.", ".msg.sys", "sys?' sys'",
                    "Exam already running", "_examRun",
                    "Precision ", "Recall ",
-                   ">Download</button>", ">Public link</button>",
+                   ">Download</button>", ">Read-only link</button>",
                    ">Add member</button>", ">Remove</button>",
                    "Make operator", ">Start vote</button>",
                    ">Add reminder</button>", "New decision",
@@ -216,7 +216,9 @@ def test_room_tabs_and_plain_labels(client):
                    "e.Detail", "t.status!=='open'",
                    "a.status==='done'", "<div class=meta>Answer</div>",
                    "<br><input id=au", "people();roster();",
-                   "overflow-wrap:anywhere"):
+                   "overflow-wrap:anywhere",
+                   "sech>Red team</div>", "sech>Recap</div>",
+                   "sech>Decisions</div>"):
         assert marker in page
     for gone in ("Room chat", ">Brief</button>", ">Ledger</button>",
                  ">Propose</button>", ">Challenge us</button>",
@@ -275,4 +277,4 @@ def test_share_tab_member_note(client):
     assert "id=tab-share" in guest  # tab exists for everyone
     assert "ask them for one" in guest
     assert "Team link" not in guest and "Single link" not in guest
-    assert ">Public link</button>" not in guest
+    assert ">Read-only link</button>" not in guest

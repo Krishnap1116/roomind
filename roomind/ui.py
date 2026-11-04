@@ -130,7 +130,7 @@ def room_page(rid: str, name: str, role: str = "member",
     sharenote_html = ""
     sharehead_html = "<div class=sech>Invite links</div>"
     if parent:
-        sharehead_html = "<div class=sech>Public link</div>"
+        sharehead_html = "<div class=sech>Read-only link</div>"
         parent_html = "<button onclick='goMain()'>← Main</button>"
         if role in ("owner", "operator"):
             side_html = "<button onclick='shareBack()'>Report to main</button>"
@@ -152,7 +152,7 @@ def room_page(rid: str, name: str, role: str = "member",
     if role == "owner":
         owner_html = "<button class=quiet onclick='closeRoom()'>Close room</button>"
     if role in ("owner", "operator"):
-        showcase_html = "<button onclick='showcase()'>Public link</button>"
+        showcase_html = "<button onclick='showcase()'>Read-only link</button>"
     sharetools_html = (f"<div class=tools>\n{invite_html}\n{showcase_html}\n</div>"
                        if (invite_html or showcase_html) else "")
     return f"""<!doctype html><html><head><meta charset=utf-8>
@@ -409,18 +409,18 @@ animation-duration:.01ms!important;transition-duration:.01ms!important}}}}
 <span id=chatrow><textarea id=t rows=1 placeholder='Say hello... (Shift+Enter for a new line)' onkeydown='if(event.key==="Enter"&&!event.shiftKey){{event.preventDefault();send()}}' oninput='grow(this)'></textarea><button class=primary onclick='send()'>Send</button></span>
 </div>
 <div id=tab-plan class=tabpane>
-<div class=sech>Understand</div>
+<div class=sech>Recap</div>
 <div class=tools>
 <button class=primary onclick='brief()'>Summary</button>
 <label><input type=checkbox id=incside> Include sides</label>
 <button onclick='catchup()' title='What you missed since you last looked'>Catch me up</button>
 </div>
-<div class=sech>Decide</div>
+<div class=sech>Decisions</div>
 <div class=tools>
 <button onclick='ledger()'>Decisions</button>
 <button onclick='propNew()'>Log decision</button>
 </div>
-<div class=sech>Challenge</div>
+<div class=sech>Red team</div>
 <div class=tools>
 <button onclick='redteam()'>Attack our plan</button>
 </div>
@@ -607,7 +607,7 @@ async function showcase(){{let r=await fetch('/rooms/'+R+'/showcase?token='+T);
   if(!r.ok||!j.url){{r=await fetch('/rooms/'+R+'/showcase?token='+T,{{method:'POST'}});
     if(!r.ok){{document.getElementById('invout').innerHTML='Public link refused: '+r.status;return;}}
     j=await r.json();}}
-  document.getElementById('invout').innerHTML=resultBox('Public link','<p style="overflow-wrap:anywhere"><b>'+location.origin+j.url+'</b></p><p><button onclick="revokeShowcase()">Revoke link</button></p>');}}
+  document.getElementById('invout').innerHTML=resultBox('Read-only link','<p style="overflow-wrap:anywhere"><b>'+location.origin+j.url+'</b></p><p><button onclick="revokeShowcase()">Revoke link</button></p>');}}
 async function revokeShowcase(){{const r=await fetch('/rooms/'+R+'/showcase?token='+T,{{method:'DELETE'}});
   document.getElementById('invout').innerHTML=r.ok?'Link revoked.':'Revoke failed: '+r.status;}}
 function linkify(s){{return esc(s).replace(/https?:\/\/[^\\s<)]+/g,u=>'<a href="'+u+'" target=_blank rel=noopener>'+u+'</a>');}}
@@ -1185,7 +1185,7 @@ async function team(){{const r=await fetch('/rooms/'+R+'/teammates?token='+T);
   h+='<p><select id=aw>'+ms.map(m=>'<option value="'+m.id+'">@'+esc(m.name)+'</option>').join('')+'</select>'
     +'<input id=ai placeholder="Do what while away?" style="width:60%">'
     +'<br><input id=au placeholder="Due (required), e.g. today" style="width:90%">'
-    +'<br><button onclick="teamAssign()">Assign</button></p>';
+    +'<br><button onclick="teamAssign()">Assign task</button></p>';
   document.getElementById('workout').innerHTML=resultBox('Team',h+'</div>');}}
 async function teamAdd(){{const q='&name='+encodeURIComponent(document.getElementById('tn').value)
   +'&role='+encodeURIComponent(document.getElementById('tr').value)
@@ -1283,7 +1283,7 @@ async function evalPanel(){{const r=await fetch('/rooms/'+R+'/eval?token='+T);
   const tr=e.trust;
   h+='<p>Trust: '+tr.word+' · fair '
     +(tr.n?Math.round(tr.pct*100)+'% ('+tr.n+')':'no verdicts yet')+'</p>';
-  if(ISMANAGE)h+="<p><button onclick='runExam()'>Run exam</button> "
+  if(ISMANAGE)h+="<p><button onclick='runExam()'>Test the referee</button> "
     +"Ten judge calls. Cost lands in the meter.</p>";
   h+='</div>';document.getElementById('roomout').innerHTML=resultBox('Eval breakdown',h);tab('room');}}
 async function runExam(){{if(window._examRun){{document.getElementById('roomout').innerHTML='Exam already running — results land here when done.';return;}}

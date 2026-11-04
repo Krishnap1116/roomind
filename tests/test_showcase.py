@@ -160,11 +160,11 @@ def test_showcase_ui_markers(client):
     rid, otok, mtok = _two(client)
     owner = client.get(f"/rooms/{rid}/app",
                        params={"token": otok}).text
-    for marker in (">Download</button>", ">Public link</button>",
+    for marker in (">Download</button>", ">Read-only link</button>",
                    "exportRoom(", "showcase(", "revokeShowcase(",
                    "id=expside", "Include sides"):
         assert marker in owner
     guest = client.get(f"/rooms/{rid}/app",
                        params={"token": mtok}).text
     assert ">Download</button>" in guest
-    assert ">Public link</button>" not in guest
+    assert ">Read-only link</button>" not in guest

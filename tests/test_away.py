@@ -185,6 +185,6 @@ def test_away_ui_markers(client):
     page = client.get(f"/rooms/{rid}/app",
                       params={"token": otok}).text
     for marker in ("Away tasks", "teamAssign()", "awayDel(",
-                   "id=aw", ">Assign</button>",
+                   "id=aw", ">Assign task</button>",
                    "Runs in the background when due", "a.answer"):
         assert marker in page

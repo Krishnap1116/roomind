@@ -136,7 +136,7 @@ def test_strip_face_wiring(client):
                             params={"token": mtok}).text
     assert "id=strip" in owner_page and "evalPanel()" in owner_page
     assert "let h='Approval: '" in owner_page  # bar shows live health only
-    assert "Run exam" in owner_page and "Exam never run" in owner_page
+    assert "Test the referee" in owner_page and "Exam never run" in owner_page
     assert "cost_per_decision" in owner_page
     assert "showAns(m)" in owner_page  # answers get thumbs
     assert "messages/'+v[0]+'/rate" in owner_page
