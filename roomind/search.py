@@ -65,13 +65,23 @@ class _Text(HTMLParser):
                 self.parts.append(text)
 
 
+_OPEN_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/120.0.0.0 Safari/537.36"),
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "*/*;q=0.8"),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 def open_page(url: str, timeout: float = 20.0) -> dict:
     """Full page {title, text} stripped of markup. {} on failure."""
     if not url.strip().lower().startswith(("http://", "https://")):
         return {}
     try:
         r = httpx.get(url.strip(), timeout=timeout, follow_redirects=True,
-                      headers={"User-Agent": "Roomind/1.0"})
+                      headers=_OPEN_HEADERS)
         r.raise_for_status()
         parser = _Text()
         parser.feed(r.text[:200000])

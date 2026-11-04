@@ -40,6 +40,24 @@ def test_ask_posts_question_kind(client, monkeypatch):
     assert kinds == [("O", "ask"), ("agent", "answer")]
 
 
+def test_answer_links_ask_id(client, monkeypatch):
+    monkeypatch.setattr(web.agent, "run_loop",
+                        lambda *a, **k: {"answer": "ok", "reasons": [],
+                                         "remember": [],
+                                         "calls": [{"tin": 1, "tout": 1}],
+                                         "searched": False})
+    j = client.post("/rooms", params={"mission": "M",
+                                      "name": "O"}).json()
+    rid, otok = j["room_id"], j["token"]
+    client.post(f"/rooms/{rid}/ask",
+                params={"token": otok, "text": "best tools here?"})
+    msgs = client.get(f"/rooms/{rid}/messages",
+                      params={"token": otok}).json()
+    ask, ans = msgs[0], [m for m in msgs if m["kind"] == "answer"][0]
+    assert ans["ask_id"] == ask["id"]
+    assert ask.get("ask_id", 0) == 0  # questions carry none
+
+
 def test_room_page_has_twin_panels(client):
     j = client.post("/rooms", params={"mission": "M",
                                       "name": "O"}).json()
@@ -47,7 +65,7 @@ def test_room_page_has_twin_panels(client):
                       params={"token": j["token"]}).text
     assert "id=thread" in page and "id=side" in page
     assert "m.kind==='ask'" in page  # questions route to main
-    assert "showDissent(m,box2)" in page  # cards judge from the side
+    assert "showDissent(m,document.getElementById('props'))" in page  # cards judge from plan
     assert "flex-direction:column" in page  # narrow screens stack
     assert page.index("id=thread") < page.index("id=q") < page.index("id=side")
     assert page.index("id=side") < page.index("id=t ")  # each input home
@@ -86,7 +104,7 @@ def test_solo_face_hides_chat_and_links(client):
     assert "getElementById('chatrow')" in solo
     assert "button[onclick='links()']" in solo
     assert "button[onclick='catchup()']" in solo
-    assert "button[onclick='check()']" in solo
+    assert "button[onclick='check()']" not in solo
     assert "button[onclick^='invite(']" in solo
     assert "getElementById('uses')" in solo
     assert "Ask your first question below." in solo
@@ -131,17 +149,30 @@ def test_send_button_and_guards(client):
                       params={"token": j["token"]}).text
     assert "id=sendbtn" in page and "<svg" in page
     assert ">Ask</button>" not in page
-    assert 'if(event.key==="Enter")ask()' in page
+    assert 'if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();ask()}' in page
+    assert 'if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();send()}' in page
+    assert "<textarea id=q" in page and "<textarea id=t" in page
+    assert "grow(this)" in page and "pre-wrap" in page
     assert "window._lastQ" in page and "b.disabled=true" in page
     assert "Retry" in page and "load();return" in page  # failure: note + retry
     assert "id=dots" in page and "id=echo" in page
-    assert "id=emptyq" in page and "all at once" in page
+    assert "id=emptyq" in page and "class=src" in page
+    assert "linkify(" in page and "Why: " not in page
     assert "id=emptyc" in page and "getElementById('emptyc')" in page
-    assert "placeholder='Say hello...'" in page
+    assert "placeholder='Say hello... (Shift+Enter for a new line)'" in page
     assert "Say hello.</p>" not in page  # hint lives in the input now
     assert "length>1)location.reload()" in page  # solo wakes on join
     assert "askstream" in page and "EventSource" in page
     assert "id=stream" in page and "askRetry()" in page
+    assert "<b>M</b>" in page and "rmission" not in page
+    assert "const MYID=" in page and "function mine(m)" in page
+    assert "msg'+(isMe?' me':'')" in page
+    for marker in ("id=newback", "id=newcard", "id=nm", "id=nn",
+                   "newChat()", "newChatGo()", "newChatHide()",
+                   "copyTxt(", "copyBoth(", "Copy both",
+                   "class=mrow", "class=plain",
+                   "width:fit-content"):
+        assert marker in page
 
 
 def test_empty_ask_rejected(client):
@@ -185,9 +216,11 @@ def test_live_routes_by_kind(client):
                                       "name": "O"}).json()
     page = client.get(f"/rooms/{j['room_id']}/app",
                       params={"token": j["token"]}).text
-    assert "if(m.kind==='answer'){showAns(m);return;}" in page
+    assert "if(m.kind==='answer'){slotAns(m);ping('chat');return;}" in page
+    assert "slotHTML(m.id)" in page and "No answer arrived." in page
     assert "getElementById('echo')" in page  # own echo swaps in place
     assert "e1.outerHTML" in page
     assert "if(m.kind==='ask'){const e1=" in page
-    assert "show(who(m),m.body);return;}" in page
-    assert "if(m.kind==='dissent'){showDissent(m,box2);return;}" in page
+    assert "show(who(m),m.body,box,true);box.innerHTML+=slotHTML(m.id);" in page
+    assert "box2,mine(m)" in page  # side chat keeps direction
+    assert "if(m.kind==='dissent'){showDissent(m,document.getElementById('props'));tab('plan');return;}" in page

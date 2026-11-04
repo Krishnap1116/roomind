@@ -37,14 +37,17 @@ SYSTEM = (
 def spark_reply(api_key: str, base: str, model: str, history: list,
                 prompt: str, timeout: float = 60.0,
                 notes: list | None = None,
-                effort: str | None = None) -> dict:
+                effort: str | None = None,
+                hist_n: int = 12,
+                system: str | None = None) -> dict:
     """One reasoning call. Returns {answer, reasons, remember, tin, tout}."""
-    msgs = [{"role": "system", "content": SYSTEM}]
+    msgs = [{"role": "system", "content": system or SYSTEM}]
     if notes:
         lines = "\n".join(f"- {n['key']}: {n['value']}" for n in notes[:5])
         msgs.append({"role": "system", "content": "Room notes:\n" + lines})
     msgs += [{"role": "user" if m["author"] != "agent" else "assistant",
-              "content": f"{m['author']}: {m['body']}"} for m in history[-12:]]
+              "content": f"{m['author']}: {m['body']}"}
+             for m in history[-hist_n:]]
     msgs.append({"role": "user", "content": prompt})
     payload = {"model": model, "messages": msgs,
                "response_format": {"type": "json_object"}}

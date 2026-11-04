@@ -61,7 +61,12 @@ def test_forget_door_and_usage_meter(client, monkeypatch):
     assert client.delete(f"/rooms/{rid}/memory",
                          params={"token": tok,
                                  "key": "standup"}).json() == {"forgotten":
-                                                               "standup"}
+                                                               "standup",
+                                                               "removed":
+                                                               True}
+    assert client.delete(f"/rooms/{rid}/memory",
+                         params={"token": tok,
+                                 "key": "standup"}).json()["removed"] is False
 
 
 def test_invite_buttons_owner_only(client):
@@ -131,7 +136,9 @@ def test_app_shell_markers(client):
                       params={"token": j["token"]}).text
     for marker in ("id=bar", "id=rooms", "id=mecard", "id=menu", "id=top",
                    "id=wrap", "id=agentcol", "id=roomcol", "sideRooms()",
-                   "sideMe()", "openRoom(", "toggleBar()", "class=msg",
+                   "sideMe()", "openRoom(", "toggleBar()", 'class="msg',
+                   "id=rmmenu", "class=rmrow", "roomMenu(",
+                   "rmLeave(", "rmClose(", "dropPin(", "⋮",
                    'class="msg agent"', 'class="card dissent"',
                    'class="card prop"', "rel=icon", "fonts.googleapis.com",
                    "prefers-reduced-motion", "Outfit"):
@@ -141,3 +148,131 @@ def test_app_shell_markers(client):
     home = client.get("/").text
     assert "Roomind" in home and "My rooms" in home
     assert "fonts.googleapis.com" in home
+
+
+def test_room_tabs_and_plain_labels(client):
+    j = client.post("/rooms", params={"mission": "Ship Friday",
+                                      "name": "K"}).json()
+    page = client.get(f"/rooms/{j['room_id']}/app",
+                      params={"token": j["token"]}).text
+    for marker in ("tabbtn-chat", "tabbtn-plan", "tabbtn-work",
+                   "tabbtn-room", "tabbtn-share", "id=tab-chat",
+                   "id=tab-plan", "id=tab-work", "id=tab-room",
+                   "id=tab-share", "id=invout", "id=planout",
+                   "id=workout", "id=roomout", "function tab(",
+                   "#tab-chat #side", "flex:1 1 auto",
+                   "max-height:none", "min-height:0",
+                   "border-radius:16px;overflow:hidden",
+                   "flex:1 1 auto;min-height:0;overflow-y:auto",
+                   "stick2",
+                   "#chatrow{flex:none", "window._shown",
+                   "dueLabel(", "setInterval(slotSweep,30000);setInterval(meter,30000);return ms;",
+                   "function ping(", "class=dot", "ping('chat')",
+                   "ping('plan')", "ping('work')", "ping('room')",
+                   "ping('share')", ">Invites</button>",
+                   "class=sech", "Open cards", "Red-team findings",
+                   "Invite links", "Room controls", "sech>People</div>",
+                   "class=primary", "class=quiet", "newGuard(box",
+                   "querySelector('.newform')",
+                   "querySelectorAll('.card.dissent')",
+                   "empty-note", "No docs yet", "No tasks yet",
+                   "No votes running", "Nothing open",
+                   "No findings yet", "renderBrief(",
+                   "renderCatchup(", "renderLedger(",
+                   "renderCheck(", "u.by_model", "memKeys()",
+                   "id=memkeys", "Remembers:",
+                   "<b>Decisions</b>", "<b>For you</b>", "<b>Open</b>",
+                   "forgetKeyBy(", "no such fact", "memToggle()",
+                   "more</button>", "resultBox(", "class=result",
+                   "class=rhead", "resultBox('Summary',",
+                   "resultBox('Decisions',", "resultBox('Team',",
+                   "Copy invite", "Copy room id",
+                   "invrow", "+5 seats", "Invite code",
+                   "Leaving never refills it.", "slotAns(",
+                   "slotHTML(", "ansHTML(", "byAsk",
+                   "<b>Ledger</b>", "<b>Side rooms</b>",
+                   "sidePickOpen(", "sidePickDone(",
+                   "Select people", "let _seen=0",
+                   "since_id='+_seen",
+                   ">Summary</button>", ">Decisions</button>",
+                   ">Log decision</button>",
+                   ">Attack our plan</button>", ">+ Doc</button>",
+                   "id=meter", "id=mutebtn", "Unmute judge",
+                   "mutebadge", "Judge listening", "judgestate",
+                   "kind==='muted'", "Already settled by someone",
+                   "_wsWasOpen", "Approval: ", "/decision",
+                   "Trust: ", "Details ›", "detailslink",
+                   "Exam never run.", ".msg.sys", "sys?' sys'",
+                   "Exam already running", "_examRun",
+                   "Precision ", "Recall ",
+                   ">Download</button>", ">Public link</button>",
+                   ">Add member</button>", ">Remove</button>",
+                   "Make operator", ">Start vote</button>",
+                   ">Add reminder</button>", "New decision",
+                   "New doc, plan, or patch", ">Submit</button>",
+                   ">Mark done</button>", ">+5 seats</button>",
+                   "Cost $", "Remove via People",
+                   "slotAns(m);ping('chat')", "Due (required)",
+                   "e.Detail", "t.status!=='open'",
+                   "a.status==='done'", "<div class=meta>Answer</div>",
+                   "<br><input id=au", "people();roster();",
+                   "overflow-wrap:anywhere"):
+        assert marker in page
+    for gone in ("Room chat", ">Brief</button>", ">Ledger</button>",
+                 ">Propose</button>", ">Challenge us</button>",
+                 ">Red-team us</button>", ">Artifact</button>",
+                 ">Spend</button>", ">Export</button>",
+                 ">Showcase</button>", ">Links</button>",
+                 "Mute/unmute", "Share back",
+                 ">Kick</button>", ">Operator</button>", "Propose it",
+                 ">Ask it</button>", "Remind us", "No links",
+                 "New proposal", "New artifact", "Spend $",
+                 ">Review us</button>", "alert(r.ok?'muted",
+                 "id=mutestate class=meta", "h+=' · OK '",
+                 "s/ans'", "/dec'", "' · P '", "' · R '",
+                 "' · Trust '",
+                 "getElementById('out')", "id=out>",
+                 "#chatrow{position:sticky",
+                 "\"<p><b>\"+l.token", "'+(i+1)+'.",
+                 "border-radius:16px;overflow-y:auto",
+                 "flex:1 0 auto;min-height:100%",
+                 "('by '+esc(m.due_text))",
+                 "(by '+esc(l.deadline)", "· by '+esc(p.deadline)",
+                 "Golden: ", "Answer: ", "Answer time: "):
+        assert gone not in page
+    assert page.index("id=tab-chat") < page.index("id=tab-plan")
+    assert page.index("id=tab-plan") < page.index("id=tab-work")
+    assert page.index("id=tab-work") < page.index("id=tab-room")
+    assert page.index("id=tab-room") < page.index("id=tab-share")
+    assert page.index("id=tab-chat") < page.index("id=side")
+    assert page.index("id=side") < page.index("id=tab-plan")
+    assert page.index("id=tab-plan") < page.index("id=props")
+    assert page.index("id=tab-work") < page.index("id=arts")
+    assert page.index("id=tab-share") < page.index("id=share")
+    assert page.index("id=tab-share") < page.index("id=invout")
+    assert page.index("id=tab-plan") < page.index("id=planout")
+    assert page.index("id=planout") < page.index("id=tab-work")
+    assert page.index("id=planout") < page.index("id=props")
+    assert page.index("id=tab-work") < page.index("id=workout")
+    assert page.index("id=workout") < page.index("id=tab-room")
+    assert page.index("id=workout") < page.index("id=rems")
+    assert page.index("id=tab-room") < page.index("id=roomout")
+    assert page.index("id=roomout") < page.index("id=tab-share")
+    assert page.index("id=roomout") < page.index("id=fk")
+
+
+def test_share_tab_member_note(client):
+    j = client.post("/rooms", params={"mission": "M",
+                                      "name": "Owner"}).json()
+    rid, otok = j["room_id"], j["token"]
+    team = client.post(f"/rooms/{rid}/invites",
+                       params={"token": otok, "uses": 5}).json()["invite"]
+    mtok = client.post(f"/rooms/{rid}/join",
+                       params={"name": "Guest",
+                               "invite": team}).json()["token"]
+    guest = client.get(f"/rooms/{rid}/app",
+                       params={"token": mtok}).text
+    assert "id=tab-share" in guest  # tab exists for everyone
+    assert "ask them for one" in guest
+    assert "Team link" not in guest and "Single link" not in guest
+    assert ">Public link</button>" not in guest

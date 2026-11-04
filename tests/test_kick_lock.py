@@ -203,11 +203,13 @@ def test_model_choice_is_personal(client, monkeypatch):
     assert client.get(f"/rooms/{rid}/state",
                       params={"token": mtok}
                       ).json() == {"locked": False, "model": "m-x",
-                                   "default": S.SPARK_MODEL}
+                                   "default": S.SPARK_MODEL,
+                                   "dissent_muted": False, "judge_last": None}
     assert client.get(f"/rooms/{rid}/state",
                       params={"token": otok}
                       ).json() == {"locked": False, "model": "",
-                                   "default": S.SPARK_MODEL}
+                                   "default": S.SPARK_MODEL,
+                                   "dissent_muted": False, "judge_last": None}
     assert judged == [S.SPARK_MODEL] * 3  # monitor never follows picks
 
 
@@ -217,11 +219,12 @@ def test_page_has_kick_lock_model_meter(client):
                             params={"token": otok}).text
     for marker in ("lockRoom()", "id=modelsel", "id=meter",
                    "kickSeat(this)", "kind==='kicked'",
-                   "code===4001", "setModel("):
+                   "code===4001", "setModel(", "id=mutebtn"):
         assert marker in owner_page
     guest_page = client.get(f"/rooms/{rid}/app",
                             params={"token": mtok}).text
     assert "id=lockbtn" not in guest_page
+    assert "id=mutebtn" not in guest_page
     assert "id=modelsel" in guest_page  # dropdown is everyone
     assert "const ISMANAGE=false" in guest_page  # kick rows never render
     assert "const ISMANAGE=true" in owner_page

@@ -1,4 +1,6 @@
 """Claude-shape loop: the model picks tools for a few rounds, then FINAL."""
+import re
+
 from . import search as tools_mod
 
 LOOP_SYS = (
@@ -13,10 +15,15 @@ LOOP_SYS = (
     " Open the most promising result with TOOL OPEN when snippets are thin."
     " Otherwise answer Final directly from knowledge. If a previous answer already covers this, reply briefly pointing to it, never a full repeat."
     " You have {n} tool rounds. Tool results arrive as TOOL RESULT."
-    " FINAL answers that used tool results must end with Sources: ... naming them."
-    " If results are thin or empty, answer with what you have and say what you"
-    " could not verify. Never invent tool results."
-    " Optional second line (max 2): MEMORY <key> :: <value> for lasting facts."
+    " FINAL answers that used tool results must end with Sources: ... naming the"
+    " pages or places (never the words TOOL, SEARCH, WEATHER, OPEN, or RESULT)."
+    " If results are thin or empty, answer with what you have. Never narrate"
+    " tool or page failures: no 'page open failed', no 'could not verify ..."
+    " because ...'. Just answer from what you verified. Never invent results."
+    " Optional second line (max 2): MEMORY <key> :: <value>."
+    " ONLY when the user explicitly asks to remember, store, or save"
+    " something. Never volunteer MEMORY lines for facts from history,"
+    " snippets, or your own answers."
 )
 
 
@@ -52,7 +59,23 @@ def _parse(text: str) -> tuple:
     return ("final", tail, mem)
 
 
+_TOOL_BIT = re.compile(r"\s*TOOL\s+(SEARCH|WEATHER|OPEN|RESULT)\b[^\n]*",
+                         re.I)
+_FAIL_SENT = re.compile(r"[^.?!]*page open failed[^.?!]*[.?!]\s*", re.I)
+
+
+def _clean_final(text: str, strip: bool = True) -> str:
+    """Deterministic backstop: the prompt says never, this enforces it."""
+    t = _TOOL_BIT.sub("", text or "")
+    t = _FAIL_SENT.sub(" ", t)
+    t = re.sub(r"\s*Sources:\s*$", "", t)
+    if strip:
+        t = t.strip()
+    return re.sub(r"[ \t]{2,}", " ", t)
+
+
 def _done(answer, calls, sources, remember, used):
+    answer = _clean_final(answer)
     if sources:
         reasons = sources[:4]
     elif used:
@@ -151,7 +174,7 @@ def streaming_call(stream_fn, on_token):
             tail = buf[sent:] if sent else buf[pre:]
             tail = "\n".join(ln for ln in tail.split("\n")
                              if not ln.strip().upper().startswith("MEMORY "))
-            on_token(tail)
+            on_token(_clean_final(tail, strip=False))
         return {"text": buf, "tin": tin, "tout": tout}
 
     return call
@@ -168,8 +191,7 @@ def toolset(search_key: str = "",
             if not search_key:
                 return ("Web search is unavailable (no key). Answer from"
                         " knowledge and say you could not check live.", [])
-            return ("No results found. Answer with what you have and say"
-                    " what you could not verify.", [])
+            return ("No results found. Answer with what you have.", [])
         lines = [f"{i + 1}. {r['title']} — {r['snippet']} ({r['url']})"
                  for i, r in enumerate(rows)]
         labels = [f"{r['title']} ({r['url']})" for r in rows[:3]
@@ -188,8 +210,7 @@ def toolset(search_key: str = "",
     def do_open(url):
         page = tools_mod.open_page(url)
         if not page or not page.get("text"):
-            return (f"Could not open {url}. Answer from the snippets and"
-                    " say what you could not verify.", [])
+            return (f"Could not open {url}. Answer from the snippets.", [])
         label = f"{page.get('title') or url} ({url})"
         return (f"Opened {url}:\n{page['text'][:2000]}", [label])
 

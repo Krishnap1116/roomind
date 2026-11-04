@@ -59,7 +59,8 @@ def test_every_seat_tagged_with_nick(client):
 def test_brief_sees_tagged_names(client, monkeypatch):
     seen = {}
 
-    def fake(api_key, base, model, history, prompt, timeout=60.0, notes=None):
+    def fake(api_key, base, model, history, prompt, timeout=60.0, notes=None, system=None,
+             effort=None):
         seen["authors"] = [m["author"] for m in history]
         return {"answer": "{}", "reasons": [], "remember": [], "tin": 1,
                 "tout": 1}

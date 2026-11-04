@@ -135,7 +135,7 @@ def test_strip_face_wiring(client):
     guest_page = client.get(f"/rooms/{rid}/app",
                             params={"token": mtok}).text
     assert "id=strip" in owner_page and "evalPanel()" in owner_page
-    assert "g.score==null" in owner_page  # bar survives unrun exams
+    assert "let h='Approval: '" in owner_page  # bar shows live health only
     assert "Run exam" in owner_page and "Exam never run" in owner_page
     assert "cost_per_decision" in owner_page
     assert "showAns(m)" in owner_page  # answers get thumbs
@@ -161,6 +161,20 @@ def test_model_failure_is_clean_503(client, monkeypatch):
                       params={"token": j["token"]}).text
     assert "Send failed." in page  # mid-stream note arrives live instead
     assert "key missing" not in page
+
+
+def test_exam_lock_rejects_overlap(client):
+    import threading
+    j = client.post("/rooms", params={"mission": "M",
+                                      "name": "O"}).json()
+    rid, otok = j["room_id"], j["token"]
+    lock = web._exam_locks.setdefault(rid, threading.Lock())
+    lock.acquire()
+    try:
+        r = client.post(f"/rooms/{rid}/eval/exam", params={"token": otok})
+        assert r.status_code == 409
+    finally:
+        lock.release()
 
 
 def test_trust_words_follow_verdicts(client):
@@ -192,7 +206,7 @@ def test_trust_words_follow_verdicts(client):
     assert e()["word"] == "muted"
     page = client.get(f"/rooms/{rid}/app",
                       params={"token": otok}).text
-    assert "Trust '+e.trust.word" in page
+    assert "Trust: '+e.trust.word" in page
 
 
 def _suite_case(cid, must, body):

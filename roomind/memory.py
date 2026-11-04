@@ -40,7 +40,20 @@ def recall(con, room: str, query: str, n: int = 3) -> list:
     return [{"key": k, "value": v} for _, k, v in out[:n]]
 
 
-def forget(con, room: str, key: str) -> None:
-    con.execute("DELETE FROM memory WHERE room=? AND key=?",
-                (room, key.strip().lower()))
+def forget(con, room: str, key: str) -> bool:
+    cur = con.execute("DELETE FROM memory WHERE room=? AND key=?",
+                      (room, key.strip().lower()))
     con.commit()
+    return cur.rowcount > 0
+
+
+_INTERNAL = {"dissent_muted", "dissent_armed", "dissent_cursor",
+             "last_dissent_mid", "last_redteam_at", "dissent_last_run"}
+
+
+def keys(con, room: str) -> list:
+    """Stored facts for display. Internal flags stay hidden."""
+    return [{"key": r["key"], "value": (r["value"] or "")[:60]}
+            for r in con.execute("SELECT key, value FROM memory WHERE room=?"
+                                 " ORDER BY key", (room,))
+            if r["key"] not in _INTERNAL]

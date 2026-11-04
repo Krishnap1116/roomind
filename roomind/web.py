@@ -2,25 +2,37 @@
 import asyncio
 import json
 import queue
+import re
 import threading
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi import WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 import httpx
 
 import roomind as S
 from . import agent, brief, dissent, eval as strip, golden, memory, meta
-from . import store, ui
+from . import remind, store, ui
 
-app = FastAPI(title="Roomind")
+@asynccontextmanager
+async def _life(app: FastAPI):
+    task = asyncio.get_running_loop().create_task(_away_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="Roomind", lifespan=_life)
 _live: dict[str, set] = {}
 _live_who: dict = {}
 _judge_tasks: set[asyncio.Task] = set()
 _judge_locks: dict[str, threading.Lock] = {}
 _ask_locks: dict[str, threading.Lock] = {}
+_exam_locks: dict[str, threading.Lock] = {}
 
 
 @app.exception_handler(httpx.HTTPError)
@@ -35,6 +47,33 @@ def _db():
 
 def _manage(me) -> bool:
     return bool(me) and me["role"] in ("owner", "operator")
+
+
+async def _maybe_remind(rid: str, force: bool = False) -> bool:
+    """One nudge per day past the set time, posted live."""
+    con = _db()
+    try:
+        if store.room_locked(con, rid):
+            return False
+        now = remind.now_local()
+        today = now.date().isoformat()
+        if not force and not remind.due_at(
+                store.room_remind_at(con, rid), now,
+                store.room_last_remind(con, rid)):
+            return False
+        body = remind.compose(store.room_mission(con, rid),
+                              store.list_ledger(con, rid),
+                              store.list_reminders(con, rid), today)
+        if not body:
+            return False
+        mid = store.post_message(con, rid, "room", body, kind="system")
+        if not force:
+            store.set_last_remind(con, rid, today)
+    finally:
+        con.close()
+    await _cast(rid, {"id": mid, "author": "room", "kind": "remind",
+                      "body": body})
+    return True
 
 
 async def _evict(rid: str) -> None:
@@ -97,6 +136,175 @@ _judge_pending: dict[str, asyncio.Task] = {}
 _judge_first: dict[str, float] = {}
 
 
+def _find_mention(text: str, mates: list):
+    """First @teammate in the line. Returns (mate, question) or (None, '')."""
+    for mate in mates:
+        found = re.search(r"@" + re.escape(mate["name"]) + r"\b", text,
+                          re.IGNORECASE)
+        if found:
+            rest = (text[:found.start()] + text[found.end():]).strip()
+            return mate, re.sub(r"\s+", " ", rest)
+    return None, ""
+
+
+def _teammate_sync(rid: str, mate: dict, question: str,
+                   model_name: str):
+    lock = _ask_locks.setdefault(rid, threading.Lock())
+    with lock:
+        con0 = _db()
+        try:
+            if S.PAUSED or store.room_locked(con0, rid) \
+                    or store.room_cost(con0, rid) >= S.MAX_ROOM_COST:
+                return None
+            hist = store.recent(con0, rid, 12)
+            noted = memory.recall(con0, rid, question)
+        finally:
+            con0.close()
+        tools = agent.toolset(S.SEARCH_API_KEY, S.SEARCH_BASE)
+        t0 = time.time()
+        try:
+            out = agent.run_loop(
+                lambda ms: meta.chat(S.MODEL_API_KEY, S.MODEL_API_BASE,
+                                     model_name, ms, effort=S.ASK_EFFORT),
+                tools,
+                f"[You are {mate['name']}, {mate['role']}."
+                f" {mate['instructions']}]\n\n{question}",
+                history=hist, notes=noted)
+        except Exception:
+            return None
+        return out, time.time() - t0
+
+
+async def _teammate_later(rid: str, mate: dict, question: str,
+                          model_name: str) -> None:
+    try:
+        done = await asyncio.to_thread(_teammate_sync, rid, mate,
+                                       question, model_name)
+    except Exception:
+        return
+    if not done:
+        return
+    out, secs = done
+    con = _db()
+    try:
+        for item in out.get("remember", [])[:2]:
+            if isinstance(item, dict):
+                memory.remember(con, rid, str(item.get("key", "")),
+                                str(item.get("value", "")))
+        tin = sum(c["tin"] for c in out["calls"])
+        tout = sum(c["tout"] for c in out["calls"])
+        store.log_cost(con, rid, "mention", model_name, tin, tout, secs)
+        aid = store.post_message(con, rid, mate["name"], out["answer"],
+                                 kind="answer", model=model_name,
+                                 reasons="\n".join(out["reasons"]))
+    finally:
+        con.close()
+    await _cast(rid, {"id": aid, "author": mate["name"], "kind": "answer",
+                      "body": out["answer"], "reasons": out["reasons"]})
+
+
+def _away_run(task: dict):
+    """Run one due away-task serially. Returns (rid, cast) or None."""
+    rid = task["room"]
+    lock = _ask_locks.setdefault(rid, threading.Lock())
+    with lock:
+        con = _db()
+        try:
+            rows = [t for t in store.list_away(con, rid)
+                    if t["id"] == task["id"]]
+            if not rows or rows[0]["status"] != "pending":
+                return None
+            task = rows[0]
+            if S.PAUSED or store.room_locked(con, rid) \
+                    or store.room_cost(con, rid) >= S.MAX_ROOM_COST:
+                return None
+            mate = store.get_teammate(con, rid, task["teammate_id"])
+            if not mate:
+                store.mark_away(con, task["id"], "failed",
+                                task["attempts"])
+                return None
+            store.mark_away(con, task["id"], "working",
+                            task["attempts"])
+            hist = store.recent(con, rid, 12)
+            noted = memory.recall(con, rid, task["instruction"])
+            creator = con.execute(
+                "SELECT model FROM members WHERE room=? AND id=?",
+                (rid, task["creator_id"])).fetchone()
+            model_name = (creator["model"] or S.SPARK_MODEL) \
+                if creator else S.SPARK_MODEL
+        finally:
+            con.close()
+        tools = agent.toolset(S.SEARCH_API_KEY, S.SEARCH_BASE)
+        t0 = time.time()
+        try:
+            out = agent.run_loop(
+                lambda ms: meta.chat(S.MODEL_API_KEY, S.MODEL_API_BASE,
+                                     model_name, ms, effort=S.ASK_EFFORT),
+                tools,
+                f"[You are {mate['name']}, {mate['role']}."
+                f" {mate['instructions']}]\n\n{task['instruction']}",
+                history=hist, notes=noted)
+        except Exception:
+            attempts = task["attempts"] + 1
+            con2 = _db()
+            try:
+                store.mark_away(con2, task["id"],
+                                "failed" if attempts >= 3 else "pending",
+                                attempts)
+            finally:
+                con2.close()
+            return None
+        secs = time.time() - t0
+        con3 = _db()
+        try:
+            for item in out.get("remember", [])[:2]:
+                if isinstance(item, dict):
+                    memory.remember(con3, rid, str(item.get("key", "")),
+                                    str(item.get("value", "")))
+            tin = sum(c["tin"] for c in out["calls"])
+            tout = sum(c["tout"] for c in out["calls"])
+            store.log_cost(con3, rid, "away", model_name, tin, tout,
+                           secs)
+            aid = store.post_message(con3, rid, mate["name"],
+                                     out["answer"], kind="answer",
+                                     model=model_name,
+                                     reasons="\n".join(out["reasons"]))
+            store.mark_away(con3, task["id"], "done",
+                            task["attempts"], aid)
+        finally:
+            con3.close()
+        return rid, {"id": aid, "author": mate["name"], "kind": "answer",
+                     "body": out["answer"], "reasons": out["reasons"]}
+
+
+def _away_tick() -> list:
+    """One pass over every due away-task. Returns casts to deliver."""
+    if S.PAUSED:
+        return []
+    con = _db()
+    try:
+        today = remind.now_local().date().isoformat()
+        due = store.due_away(con, today)
+    finally:
+        con.close()
+    casts = []
+    for task in due:
+        done = _away_run(task)
+        if done:
+            casts.append(done)
+    return casts
+
+
+async def _away_loop() -> None:
+    while True:
+        await asyncio.sleep(S.AWAY_TICK_S)
+        try:
+            for rid, payload in await asyncio.to_thread(_away_tick):
+                await _cast(rid, payload)
+        except Exception:
+            pass
+
+
 def _spawn_judge(rid: str, model_name: str) -> None:
     """Debounced monitor: idle seconds after quiet, maxwait at latest."""
     loop = asyncio.get_running_loop()
@@ -149,7 +357,8 @@ def room_app(rid: str, token: str):
                             " WHERE room=?", (rid,)).fetchone()["c"]
         return ui.room_page(rid, me["name"], me["role"],
                             room["mission"] if room else "",
-                            seats < 2)
+                            seats < 2, store.room_parent(con, rid),
+                            me["id"])
     finally:
         con.close()
 
@@ -164,12 +373,199 @@ def create_room(mission: str, name: str = ""):
         con.close()
 
 
+@app.post("/rooms/{rid}/side")
+async def side_create(rid: str, token: str, mission: str,
+                      mids: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if store.room_parent(con, rid):
+            raise HTTPException(400, "side rooms stay one level deep")
+        seats = con.execute("SELECT COUNT(*) AS c FROM members"
+                            " WHERE room=?", (rid,)).fetchone()["c"]
+        if seats < 2:
+            raise HTTPException(400, "split needs a shared room")
+        picked = []
+        for mid in [m.strip() for m in mids.split(",") if m.strip()]:
+            if mid == me["id"]:
+                continue
+            target = store.member_by_id(con, rid, mid)
+            if not target:
+                raise HTTPException(400, "pick people from this room")
+            picked.append(target)
+        mission = mission[:200].strip() or "Untitled side mission"
+        out = store.new_room(con, mission, me["name"], me["id"])
+        store.set_parent(con, out["room_id"], rid)
+        for target in picked:
+            store.seat_member(con, out["room_id"], target["name"],
+                              "member", target["id"])
+        store.ensure_nicks(con, out["room_id"])
+        with_names = (" with " + ", ".join(t["name"] for t in picked)
+                      if picked else "")
+        sys_id = store.post_message(con, rid, "room",
+                                    f"{me['name']} opened side room"
+                                    f" '{mission}'{with_names}"
+                                    f" ({out['room_id']}).",
+                                    kind="system")
+    finally:
+        con.close()
+    await _cast(rid, {"id": sys_id, "author": "room", "kind": "system",
+                      "body": f"side room: {mission}"})
+    return out
+
+
+@app.get("/rooms/{rid}/sides")
+def sides_list(rid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        return [s for s in store.list_sides(con, rid)
+                if store.member_by_origin(con, s["room_id"], me["id"])]
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{sid}/open-side")
+def open_side(sid: str, ptoken: str):
+    con = _db()
+    try:
+        parent = store.room_parent(con, sid)
+        if not parent:
+            raise HTTPException(404, "not a side room")
+        pm = store.member_by_token(con, parent, ptoken)
+        if not pm:
+            raise HTTPException(403, "parent seat required")
+        old = store.member_by_origin(con, sid, pm["id"])
+        if not old:
+            raise HTTPException(403, "side seat required")
+        return {"token": old["token"]}
+    finally:
+        con.close()
+
+
+@app.get("/rooms/{sid}/roster")
+def side_roster(sid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, sid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        parent = store.room_parent(con, sid)
+        if not parent:
+            raise HTTPException(400, "main rooms use invites")
+        side = store.list_members(con, sid)
+        origins = {m["origin"] for m in con.execute(
+            "SELECT origin FROM members WHERE room=?", (sid,))}
+        main = [m for m in store.list_members(con, parent)
+                if m["id"] not in origins]
+        return {"side": side, "main": main}
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{sid}/roster/add")
+async def roster_add(sid: str, token: str, mid: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, sid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        parent = store.room_parent(con, sid)
+        if not parent:
+            raise HTTPException(400, "main rooms use invites")
+        if store.room_locked(con, sid) or store.room_locked(con, parent):
+            raise HTTPException(403, "room locked")
+        target = store.member_by_id(con, parent, mid)
+        if not target:
+            raise HTTPException(404, "no such member in the main room")
+        old = store.member_by_origin(con, sid, target["id"])
+        if old:
+            return {"token": old["token"], "new": False}
+        seat = store.seat_member(con, sid, target["name"], "member",
+                                 target["id"])
+        mission = store.room_mission(con, sid)
+        sys_main = store.post_message(con, parent, "room",
+                                      f"{target['name']} joined side room"
+                                      f" '{mission}' ({sid}).",
+                                      kind="system")
+        sys_side = store.post_message(con, sid, "room",
+                                      f"{me['name']} added {target['name']}"
+                                      " to the side room.",
+                                      kind="system")
+    finally:
+        con.close()
+    await _cast(parent, {"id": sys_main, "author": "room", "kind": "system",
+                         "body": f"{target['name']} joined side room:"
+                                 f" {mission}"})
+    await _cast(sid, {"id": sys_side, "author": "room", "kind": "system",
+                      "body": f"added: {target['name']}"})
+    return {"token": seat["token"], "new": True}
+
+
+@app.post("/rooms/{sid}/share-back")
+async def share_back(sid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, sid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        parent = store.room_parent(con, sid)
+        if not parent:
+            raise HTTPException(400, "main rooms have nowhere to report")
+        if store.room_locked(con, sid) or store.room_locked(con, parent):
+            raise HTTPException(403, "room locked")
+        mission = store.room_mission(con, sid)
+        open_led = [r for r in store.list_ledger(con, sid)
+                    if r.get("status", "open") == "open"]
+        chats = con.execute("SELECT COUNT(*) AS c FROM messages"
+                            " WHERE room=? AND kind='chat'",
+                            (sid,)).fetchone()["c"]
+        if open_led:
+            lines = "\n".join(
+                f"• {r['what']}"
+                f"{' — ' + r['who'] if r.get('who') else ''}"
+                f"{' (' + remind.due_label(r['deadline']) + ')' if r.get('deadline') else ''}"
+                for r in open_led)
+        else:
+            lines = "(no stamped decisions yet)"
+        body = (f"Side room '{mission}' reports (by {me['name']}):\n"
+                f"{lines}\n{chats} chats · room {sid}")
+        sys_id = store.post_message(con, parent, "room", body,
+                                    kind="system")
+        marker = f"side-report:{sid}"
+        live = [r for r in store.list_ledger(con, parent)
+                if r.get("status", "open") == "open"
+                and r.get("why") == marker]
+        if live:
+            store.update_ledger(con, parent, live[0]["id"], body,
+                                me["name"], marker)
+        else:
+            store.add_ledger(con, parent, body, me["name"], marker)
+    finally:
+        con.close()
+    await _cast(parent, {"id": sys_id, "author": "room", "kind": "system",
+                         "body": body})
+    return {"shared": parent}
+
+
 @app.post("/rooms/{rid}/join")
 def join(rid: str, name: str, invite: str):
     con = _db()
     try:
+        if not con.execute("SELECT 1 FROM rooms WHERE id=?",
+                           (rid,)).fetchone():
+            raise HTTPException(404, "no such room")
+        if store.room_parent(con, rid):
+            raise HTTPException(400, "side rooms seat from the main room")
         try:
-            return store.join_member(con, rid, name.strip() or "Guest", invite)
+            return store.join_member(con, rid, name.strip() or "Guest",
+                                     invite)
         except LookupError:
             raise HTTPException(403, "bad or expired invite")
     finally:
@@ -177,11 +573,12 @@ def join(rid: str, name: str, invite: str):
 
 
 @app.get("/rooms/{rid}/messages")
-def messages(rid: str, token: str, n: int = 30):
+async def messages(rid: str, token: str, n: int = 30):
     con = _db()
     try:
         if not store.member_by_token(con, rid, token):
             raise HTTPException(403, "bad token")
+        await _maybe_remind(rid)
         rows = store.recent(con, rid, min(n, 100))
         tags = store.display_tags(con, rid)
         badges = store.role_badges(con, rid)
@@ -220,7 +617,8 @@ async def ask(rid: str, token: str, text: str, model: str = ""):
         hist = store.recent(con, rid)
         noted = memory.recall(con, rid, text)
         await _cast(rid, {"id": qid, "author": me["name"], "tag": tag,
-                          "badge": badge, "kind": "ask", "body": text})
+                          "badge": badge, "kind": "ask", "body": text,
+                          "author_id": me["id"]})
         model_name = model or me["model"] or S.SPARK_MODEL
         tools = agent.toolset(S.SEARCH_API_KEY, S.SEARCH_BASE)
         t0 = time.time()
@@ -239,9 +637,11 @@ async def ask(rid: str, token: str, text: str, model: str = ""):
         aid = store.post_message(con, rid, "agent", out["answer"],
                                  kind="answer",
                                  model=model_name,
-                                 reasons="\n".join(out["reasons"]))
+                                 reasons="\n".join(out["reasons"]),
+                                 ask_id=qid)
         await _cast(rid, {"id": aid, "author": "agent", "kind": "answer",
-                          "body": out["answer"]})
+                          "body": out["answer"], "reasons": out["reasons"],
+                          "ask_id": qid})
         _spawn_judge(rid, S.SPARK_MODEL)
         return {"answer": out["answer"], "reasons": out["reasons"]}
     finally:
@@ -273,7 +673,8 @@ async def askstream(rid: str, token: str, text: str, model: str = ""):
     finally:
         con.close()
     await _cast(rid, {"id": qid, "author": me["name"], "tag": tag,
-                      "badge": badge, "kind": "ask", "body": text})
+                      "badge": badge, "kind": "ask", "body": text,
+                      "author_id": me["id"]})
     model_name = model or my_model or S.SPARK_MODEL
     tools = agent.toolset(S.SEARCH_API_KEY, S.SEARCH_BASE)
 
@@ -325,11 +726,13 @@ async def askstream(rid: str, token: str, text: str, model: str = ""):
             store.log_cost(con2, rid, "ask", model_name, tin, tout, secs)
             aid = store.post_message(con2, rid, "agent", out["answer"],
                                      kind="answer", model=model_name,
-                                     reasons="\n".join(out["reasons"]))
+                                     reasons="\n".join(out["reasons"]),
+                                     ask_id=qid)
         finally:
             con2.close()
         await _cast(rid, {"id": aid, "author": "agent", "kind": "answer",
-                          "body": out["answer"]})
+                          "body": out["answer"], "reasons": out["reasons"],
+                          "ask_id": qid})
         yield f"data: {json.dumps({'done': {'answer': out['answer'], 'reasons': out['reasons']}})}\n\n"
 
     _spawn_judge(rid, S.SPARK_MODEL)
@@ -337,14 +740,16 @@ async def askstream(rid: str, token: str, text: str, model: str = ""):
 
 
 @app.get("/rooms/{rid}/brief")
-def room_brief(rid: str, token: str, model: str = ""):
+def room_brief(rid: str, token: str, model: str = "",
+               include_sides: bool = False):
     con = _db()
     try:
         me = store.member_by_token(con, rid, token)
         if not me:
             raise HTTPException(403, "bad token")
         return brief.build_brief(con, rid,
-                                 model or me["model"] or S.SPARK_MODEL)
+                                 model or me["model"] or S.SPARK_MODEL,
+                                 include_sides, me["id"])
     finally:
         con.close()
 
@@ -381,16 +786,97 @@ def dissent_check(rid: str, token: str, model: str = ""):
 
 
 @app.post("/rooms/{rid}/dissent/mute")
-def dissent_mute(rid: str, token: str, on: bool = True):
+async def dissent_mute(rid: str, token: str, on: bool = True):
     con = _db()
     try:
         me = store.member_by_token(con, rid, token)
         if not _manage(me):
             raise HTTPException(403, "owner or operator only")
         memory.remember(con, rid, "dissent_muted", "1" if on else "0")
-        return {"muted": on}
     finally:
         con.close()
+    await _cast(rid, {"kind": "muted", "muted": on})
+    return {"muted": on}
+
+
+def _red_cards(con, rid: str) -> list:
+    cards = []
+    for r in store.list_redteam(con, rid):
+        try:
+            body = json.loads(r["body"])
+        except ValueError:
+            continue
+        cards.append({"id": r["id"], "rating": r["rating"],
+                      "flaws": body.get("flaws", []),
+                      "verdict": body.get("verdict", ""),
+                      "strongest": body.get("strongest", "")})
+    return cards
+
+
+@app.get("/rooms/{rid}/redteam")
+def redteam_list(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        return _red_cards(con, rid)
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/redteam")
+async def redteam_run(rid: str, token: str, model: str = ""):
+    if S.PAUSED:
+        raise HTTPException(503, "engine paused")
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        card, reason = dissent.redteam_room(con, rid,
+                                            model or S.SPARK_MODEL)
+    finally:
+        con.close()
+    if card:
+        body = {k: card[k] for k in ("flaws", "verdict", "strongest")}
+        await _cast(rid, {"id": card["id"], "author": "redteam",
+                         "kind": "redteam", "body": json.dumps(body)})
+    return {"triggered": bool(card), "card": card, "reason": reason}
+
+
+@app.post("/rooms/{rid}/redteam/{mid}/resolve")
+async def redteam_resolve(rid: str, mid: int, token: str, verdict: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if verdict not in ("fixed", "accepted", "dismissed"):
+            raise HTTPException(400, "fixed, accepted, or dismissed")
+        out = store.resolve_redteam(con, rid, mid, verdict)
+        if not out:
+            raise HTTPException(404, "no such attack card")
+        brow = con.execute("SELECT body FROM messages WHERE id=? AND room=?",
+                           (mid, rid)).fetchone()
+        try:
+            vtxt = str(json.loads((brow["body"] if brow else "") or "{}").get(
+                "verdict", ""))[:80]
+        except ValueError:
+            vtxt = ""
+        note = f"{me['name']} marked attack {verdict}"
+        if vtxt:
+            note += f": {vtxt}"
+        sys_id = store.post_message(con, rid, "room", note, kind="system")
+    finally:
+        con.close()
+    await _cast(rid, {"id": sys_id, "author": "room", "kind": "system",
+                      "body": note})
+    await _cast(rid, {"id": mid, "author": "redteam",
+                      "kind": "redteam", "rating": 1, "body": verdict})
+    return out
 
 
 @app.get("/rooms/{rid}/proposals")
@@ -417,9 +903,29 @@ async def proposal_create(rid: str, token: str, what: str, who: str = "",
         what = what.strip()
         if not what:
             raise HTTPException(400, "empty decision")
-        prop = store.add_proposal(con, rid, what, who.strip(),
-                                  why.strip(), deadline.strip(),
-                                  me["name"])
+        who, why, deadline = who.strip(), why.strip(), deadline.strip()
+        want = " ".join(what.split()).lower()
+        same = [p for p in store.list_proposals(con, rid)
+                if " ".join(p["what"].split()).lower() == want]
+        if same:
+            prop = same[0]
+            store.update_proposal(con, rid, prop["id"], what, who, why,
+                                  deadline, prop["updates"] or "",
+                                  bool(prop["needs_detail"]))
+            prop = store.get_proposal(con, rid, prop["id"])
+        else:
+            hit = store.find_similar_open(con, rid, what)
+            old = store.get_proposal(con, rid, hit[1]) \
+                if hit and hit[0] == "P" else None
+            if old and old["state"] == "open":
+                store.update_proposal(con, rid, old["id"], what, who,
+                                      why, deadline, old["updates"] or "",
+                                      bool(old["needs_detail"]))
+                prop = store.get_proposal(con, rid, old["id"])
+            else:
+                ref = f"L{hit[1]}" if hit and hit[0] == "L" else ""
+                prop = store.add_proposal(con, rid, what, who, why,
+                                          deadline, me["name"], ref, False)
     finally:
         con.close()
     await _cast(rid, {"id": prop["id"], "author": "room",
@@ -475,7 +981,8 @@ async def proposal_confirm(rid: str, pid: int, token: str, what: str = "",
 async def proposal_dismiss(rid: str, pid: int, token: str):
     con = _db()
     try:
-        if not store.member_by_token(con, rid, token):
+        me = store.member_by_token(con, rid, token)
+        if not me:
             raise HTTPException(403, "bad token")
         if store.room_locked(con, rid):
             raise HTTPException(403, "room locked")
@@ -484,10 +991,120 @@ async def proposal_dismiss(rid: str, pid: int, token: str):
             raise HTTPException(404, "proposal gone")
         store.settle_proposal(con, rid, pid, "dismissed", prop["what"],
                               prop["who"], prop["why"], prop["deadline"])
+        note = f"{me['name']} dismissed: {prop['what']}"
+        sys_id = store.post_message(con, rid, "room", note, kind="system")
     finally:
         con.close()
+    await _cast(rid, {"id": sys_id, "author": "room", "kind": "system",
+                      "body": note})
     await _cast(rid, {"kind": "proposal", "id": pid, "state": "dismissed"})
     return {"dismissed": pid}
+
+
+@app.get("/rooms/{rid}/reminders")
+def reminders_list(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        today = remind.now_local().date().isoformat()
+        rows = store.list_reminders(con, rid)
+        for row in rows:
+            row["flag"] = remind.flag(row.get("due_date") or "", today)
+        return {"reminders": rows,
+                "sched": store.room_remind_at(con, rid)}
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/reminders")
+async def reminder_add(rid: str, token: str, text: str, due: str = "",
+                       owner: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        text = text.strip()
+        if not text:
+            raise HTTPException(400, "empty reminder")
+        out = store.add_reminder(con, rid, text, due.strip(),
+                                 owner.strip(), me["name"])
+    finally:
+        con.close()
+    await _cast(rid, {"kind": "reminder"})
+    return out
+
+
+@app.post("/rooms/{rid}/reminders/{mid}")
+async def reminder_edit(rid: str, mid: int, token: str,
+                        text: str | None = None,
+                        due: str | None = None,
+                        owner: str | None = None,
+                        done: bool | None = None):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        ok = store.update_reminder(
+            con, rid, mid, (text or "").strip(),
+            None if due is None else due.strip(),
+            None if owner is None else owner.strip(), done)
+        if not ok:
+            raise HTTPException(404, "reminder gone")
+    finally:
+        con.close()
+    await _cast(rid, {"kind": "reminder"})
+    return {"updated": mid}
+
+
+@app.delete("/rooms/{rid}/reminders/{mid}")
+async def reminder_delete(rid: str, mid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if not store.delete_reminder(con, rid, mid):
+            raise HTTPException(404, "reminder gone")
+    finally:
+        con.close()
+    await _cast(rid, {"kind": "reminder"})
+    return {"deleted": mid}
+
+
+@app.post("/rooms/{rid}/remind-time")
+def remind_time(rid: str, token: str, at: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        at = remind.normalize_at(at)
+        if not at:
+            raise HTTPException(400, "use HH:MM, 24-hour, or off")
+        store.set_remind_at(con, rid, at)
+        return {"sched": at}
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/remind-now")
+async def remind_now(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+    finally:
+        con.close()
+    return {"posted": await _maybe_remind(rid, force=True)}
 
 
 @app.post("/rooms/{rid}/ledger")
@@ -513,14 +1130,624 @@ def ledger_list(rid: str, token: str):
         con.close()
 
 
+@app.post("/rooms/{rid}/artifacts")
+async def artifact_create(rid: str, token: str, title: str, body: str,
+                          kind: str = "doc"):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        title, body = title.strip(), body.strip()
+        if not title or not body:
+            raise HTTPException(400, "title and body required")
+        art = store.add_artifact(con, rid, title, kind.strip() or "doc",
+                                 body, me["name"])
+    finally:
+        con.close()
+    await _cast(rid, {"id": art["id"], "author": "room",
+                      "kind": "artifact", "body": art["title"]})
+    return art
+
+
+@app.get("/rooms/{rid}/artifacts")
+def artifact_list(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        return store.list_artifacts(con, rid)
+    finally:
+        con.close()
+
+
+@app.get("/rooms/{rid}/artifacts/{aid}")
+def artifact_get(rid: str, aid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        art = store.get_artifact(con, rid, aid)
+        if not art:
+            raise HTTPException(404, "no such artifact")
+        return art
+    finally:
+        con.close()
+
+
+@app.get("/rooms/{rid}/artifacts/{aid}/versions")
+def artifact_versions(rid: str, aid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if not store.get_artifact(con, rid, aid):
+            raise HTTPException(404, "no such artifact")
+        return store.list_versions(con, rid, aid)
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/artifacts/{aid}/edit")
+async def artifact_edit(rid: str, aid: int, token: str, body: str,
+                        title: str = "", kind: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if not body.strip():
+            raise HTTPException(400, "body required")
+        art = store.edit_artifact(con, rid, aid, title.strip(),
+                                  kind.strip(), body.strip(), me["name"])
+        if not art:
+            raise HTTPException(404, "no such artifact")
+    finally:
+        con.close()
+    await _cast(rid, {"id": art["id"], "author": "room",
+                      "kind": "artifact", "body": art["title"]})
+    return art
+
+
+async def _artifact_move(rid: str, aid: int, token: str, to: str,
+                         refused: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        art = store.move_artifact(con, rid, aid, to, me["name"])
+        if art is None:
+            raise HTTPException(404, "no such artifact")
+        if art is False:
+            raise HTTPException(400, refused)
+    finally:
+        con.close()
+    await _cast(rid, {"id": art["id"], "author": "room",
+                      "kind": "artifact", "body": art["title"]})
+    return art
+
+
+@app.post("/rooms/{rid}/artifacts/{aid}/propose")
+async def artifact_propose(rid: str, aid: int, token: str):
+    return await _artifact_move(rid, aid, token, "proposed",
+                                "only drafts can be proposed")
+
+
+@app.post("/rooms/{rid}/artifacts/{aid}/approve")
+async def artifact_approve(rid: str, aid: int, token: str):
+    return await _artifact_move(rid, aid, token, "approved",
+                                "propose it first")
+
+
+@app.post("/rooms/{rid}/artifacts/{aid}/apply")
+async def artifact_apply(rid: str, aid: int, token: str):
+    return await _artifact_move(rid, aid, token, "applied",
+                                "approve it first")
+
+
+@app.post("/rooms/{rid}/tasks")
+async def task_create(rid: str, token: str, title: str, details: str = "",
+                      assignee: str = "", due: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if not title.strip():
+            raise HTTPException(400, "title required")
+        task = store.add_task(con, rid, title.strip(), details.strip(),
+                              assignee.strip(), due.strip(), me["name"])
+    finally:
+        con.close()
+    await _cast(rid, {"id": task["id"], "author": "room",
+                      "kind": "task", "body": task["title"]})
+    return task
+
+
+@app.get("/rooms/{rid}/tasks")
+def task_list(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        today = remind.now_local().date().isoformat()
+        rows = store.list_tasks(con, rid)
+        for row in rows:
+            row["flag"] = remind.flag(row.get("due_date") or "", today)
+        return rows
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/tasks/{tid}/edit")
+async def task_edit(rid: str, tid: int, token: str, title: str = "",
+                    details: str = "", assignee: str = "", due: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        task = store.edit_task(con, rid, tid, title.strip(),
+                               details.strip(), assignee.strip(),
+                               due.strip())
+        if not task:
+            raise HTTPException(404, "no such task")
+    finally:
+        con.close()
+    await _cast(rid, {"id": task["id"], "author": "room",
+                      "kind": "task", "body": task["title"]})
+    return task
+
+
+@app.post("/rooms/{rid}/tasks/{tid}/done")
+async def task_done(rid: str, tid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        task = store.set_task_done(con, rid, tid, True)
+        if not task:
+            raise HTTPException(404, "no such task")
+    finally:
+        con.close()
+    await _cast(rid, {"id": task["id"], "author": "room",
+                      "kind": "task", "body": task["title"]})
+    return task
+
+
+@app.post("/rooms/{rid}/tasks/{tid}/reopen")
+async def task_reopen(rid: str, tid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        task = store.set_task_done(con, rid, tid, False)
+        if not task:
+            raise HTTPException(404, "no such task")
+    finally:
+        con.close()
+    await _cast(rid, {"id": task["id"], "author": "room",
+                      "kind": "task", "body": task["title"]})
+    return task
+
+
+@app.post("/rooms/{rid}/tasks/{tid}/delete")
+async def task_delete(rid: str, tid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if not store.delete_task(con, rid, tid):
+            raise HTTPException(404, "no such task")
+    finally:
+        con.close()
+    await _cast(rid, {"id": tid, "author": "room",
+                      "kind": "task", "body": "deleted"})
+    return {"deleted": tid}
+
+
+def _poll_view(con, poll: dict, mid: str) -> dict:
+    votes = store.poll_votes(con, poll["room"], poll["id"])
+    tally = [0] * len(poll["options"])
+    by_option: list = [[] for _ in poll["options"]]
+    mine = None
+    for v in votes:
+        idx = v["option_idx"]
+        if 0 <= idx < len(tally):
+            tally[idx] += 1
+            by_option[idx].append(
+                f"{v['name']} ·{v['nick']}" if v["nick"] else v["name"])
+        if v["member_id"] == mid:
+            mine = idx
+    poll["tally"] = tally
+    poll["total"] = sum(tally)
+    poll["by_option"] = by_option
+    poll["my_vote"] = mine
+    return poll
+
+
+@app.post("/rooms/{rid}/polls")
+async def poll_create(rid: str, token: str, question: str, options: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        try:
+            opts = [o.strip()[:80] for o in json.loads(options)]
+        except (ValueError, TypeError):
+            raise HTTPException(400, "options must be a JSON list")
+        opts = [o for o in opts if o]
+        if not question.strip() or not 2 <= len(opts) <= 4:
+            raise HTTPException(400, "ask 2 to 4 options")
+        poll = store.add_poll(con, rid, question.strip(), opts,
+                              me["name"])
+    finally:
+        con.close()
+    await _cast(rid, {"id": poll["id"], "author": "room",
+                      "kind": "poll", "body": poll["question"]})
+    return poll
+
+
+@app.get("/rooms/{rid}/polls")
+def poll_list(rid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        return [_poll_view(con, p, me["id"])
+                for p in store.list_polls(con, rid)]
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/polls/{pid}/vote")
+async def poll_vote(rid: str, pid: int, token: str, option: int):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        poll = store.get_poll(con, rid, pid)
+        if not poll:
+            raise HTTPException(404, "no such poll")
+        if poll["state"] != "open":
+            raise HTTPException(400, "poll closed")
+        if not 0 <= option < len(poll["options"]):
+            raise HTTPException(400, "no such option")
+        store.vote_poll(con, rid, pid, me["id"], me["name"],
+                        me["nick"] or "", option)
+    finally:
+        con.close()
+    await _cast(rid, {"id": pid, "author": "room",
+                      "kind": "poll", "body": poll["question"]})
+    return {"voted": option}
+
+
+@app.post("/rooms/{rid}/polls/{pid}/close")
+async def poll_close(rid: str, pid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        poll = store.get_poll(con, rid, pid)
+        if not poll:
+            raise HTTPException(404, "no such poll")
+        poll = store.close_poll(con, rid, pid)
+    finally:
+        con.close()
+    await _cast(rid, {"id": pid, "author": "room",
+                      "kind": "poll", "body": poll["question"]})
+    return poll
+
+
+def _room_pack(con, rid: str) -> dict:
+    return {
+            "room": rid,
+            "mission": store.room_mission(con, rid),
+            "members": [
+                {"name": m["name"], "nick": m["nick"], "role": m["role"]}
+                for m in store.list_members(con, rid)],
+            "messages": [
+                {"id": m["id"], "author": m["author"],
+                 "kind": m["kind"], "body": m["body"],
+                 "rating": m["rating"], "created_at": m["created_at"]}
+                for m in con.execute(
+                    "SELECT * FROM messages WHERE room=? ORDER BY id",
+                    (rid,))],
+            "ledger": store.list_ledger(con, rid),
+            "proposals": [
+                dict(r) for r in con.execute(
+                    "SELECT * FROM proposals WHERE room=? ORDER BY id",
+                    (rid,))],
+            "artifacts": [
+                {**dict(r), "versions": store.list_versions(
+                    con, rid, r["id"])}
+                for r in con.execute(
+                    "SELECT * FROM artifacts WHERE room=? ORDER BY id",
+                    (rid,))],
+            "tasks": store.list_tasks(con, rid),
+            "polls": [
+                _poll_view(con, {**dict(r),
+                                 "options": json.loads(r["options"])}, "")
+                for r in con.execute(
+                    "SELECT * FROM polls WHERE room=? ORDER BY id",
+                    (rid,))],
+            "reminders": store.list_reminders(con, rid),
+        }
+
+
+@app.get("/rooms/{rid}/teammates")
+def teammate_list(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        return store.list_teammates(con, rid)
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/teammates")
+def teammate_add(rid: str, token: str, name: str, role: str = "",
+                 instructions: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if not name.strip():
+            raise HTTPException(400, "name required")
+        mate = store.add_teammate(con, rid, name.strip(), role.strip(),
+                                  instructions.strip(), me["name"])
+        if not mate:
+            raise HTTPException(400, "name taken")
+        return mate
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/teammates/{tid}/edit")
+def teammate_edit(rid: str, tid: int, token: str, name: str = "",
+                  role: str = "", instructions: str = ""):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        mate = store.edit_teammate(con, rid, tid, name.strip(),
+                                   role.strip(), instructions.strip())
+        if mate is None:
+            raise HTTPException(404, "no such teammate")
+        if mate is False:
+            raise HTTPException(400, "name taken")
+        return mate
+    finally:
+        con.close()
+
+
+@app.delete("/rooms/{rid}/teammates/{tid}")
+def teammate_delete(rid: str, tid: int, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        if not store.delete_teammate(con, rid, tid):
+            raise HTTPException(404, "no such teammate")
+        return {"removed": tid}
+    finally:
+        con.close()
+
+
+@app.get("/rooms/{rid}/away")
+def away_list(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        return store.list_away(con, rid)
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/away")
+def away_assign(rid: str, token: str, teammate: int, instruction: str,
+                due: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        mate = store.get_teammate(con, rid, teammate)
+        if not mate:
+            raise HTTPException(404, "no such teammate")
+        if not instruction.strip():
+            raise HTTPException(400, "instruction required")
+        if not remind.parse_due(due.strip()):
+            raise HTTPException(400, "give a due date like Friday")
+        return store.add_away(con, rid, mate, instruction.strip(),
+                              due.strip(), me["name"], me["id"])
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/away/{aid}/delete")
+def away_delete(rid: str, aid: int, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        if store.room_locked(con, rid):
+            raise HTTPException(403, "room locked")
+        rows = [t for t in store.list_away(con, rid) if t["id"] == aid]
+        if not rows:
+            raise HTTPException(404, "no such away task")
+        store.delete_away(con, rid, aid)
+        return {"deleted": aid}
+    finally:
+        con.close()
+
+
+@app.get("/rooms/{rid}/export")
+def room_export(rid: str, token: str, include_sides: bool = False):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not me:
+            raise HTTPException(403, "bad token")
+        pack = _room_pack(con, rid)
+        pack["exported_at"] = time.time()
+        if include_sides and not store.room_parent(con, rid):
+            pack["sides"] = []
+            hidden = 0
+            for s in store.list_sides(con, rid):
+                if store.member_by_origin(con, s["room_id"], me["id"]):
+                    pack["sides"].append(_room_pack(con, s["room_id"]))
+                else:
+                    hidden += 1
+            pack["sides_hidden"] = hidden
+    finally:
+        con.close()
+    return Response(
+        content=json.dumps(pack, indent=1),
+        media_type="application/json",
+        headers={"Content-Disposition":
+                 f"attachment; filename=room-{rid}.json"})
+
+
+def _showcase_data(con, rid: str) -> dict:
+    polls = []
+    for row in con.execute("SELECT * FROM polls WHERE room=? ORDER BY id",
+                           (rid,)):
+        p = dict(row)
+        p["options"] = json.loads(p["options"])
+        polls.append(_poll_view(con, p, ""))
+    chats = [
+        {"author": m["author"], "kind": m["kind"], "body": m["body"]}
+        for m in store.recent(con, rid, 50)
+        if m.get("kind") in ("chat", "system", "ask", "answer")]
+    return {
+        "mission": store.room_mission(con, rid),
+        "people": [{"name": m["name"], "nick": m["nick"],
+                    "role": m["role"]}
+                   for m in store.list_members(con, rid)],
+        "ledger": [dict(r) for r in con.execute(
+            "SELECT what, who, why, deadline FROM ledger WHERE room=?"
+            " AND status='open' ORDER BY id", (rid,))],
+        "artifacts": [dict(r) for r in con.execute(
+            "SELECT title, kind, version, status, body FROM artifacts"
+            " WHERE room=? ORDER BY id", (rid,))],
+        "tasks": [dict(r) for r in con.execute(
+            "SELECT title, details, assignee, due_text, status FROM tasks"
+            " WHERE room=? ORDER BY id", (rid,))],
+        "polls": polls,
+        "redteam": _red_cards(con, rid),
+        "chats": chats,
+    }
+
+
+@app.get("/rooms/{rid}/showcase")
+def showcase_get(rid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        tok = store.get_showcase(con, rid)
+        return {"url": f"/show/{tok}" if tok else ""}
+    finally:
+        con.close()
+
+
+@app.post("/rooms/{rid}/showcase")
+def showcase_mint(rid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        tok = store.mint_showcase(con, rid, me["name"])
+        return {"url": f"/show/{tok}"}
+    finally:
+        con.close()
+
+
+@app.delete("/rooms/{rid}/showcase")
+def showcase_revoke(rid: str, token: str):
+    con = _db()
+    try:
+        me = store.member_by_token(con, rid, token)
+        if not _manage(me):
+            raise HTTPException(403, "owner or operator only")
+        return {"revoked": store.revoke_showcase(con, rid)}
+    finally:
+        con.close()
+
+
+@app.get("/show/{token}", response_class=HTMLResponse)
+def showcase_view(token: str):
+    con = _db()
+    try:
+        rid = store.room_by_showcase(con, token)
+        if not rid:
+            raise HTTPException(404, "no such showcase")
+        return ui.showcase_page(_showcase_data(con, rid))
+    finally:
+        con.close()
+
+
+@app.get("/rooms/{rid}/memory")
+def memory_keys(rid: str, token: str):
+    con = _db()
+    try:
+        if not store.member_by_token(con, rid, token):
+            raise HTTPException(403, "bad token")
+        return memory.keys(con, rid)
+    finally:
+        con.close()
+
+
 @app.delete("/rooms/{rid}/memory")
 def memory_forget(rid: str, token: str, key: str):
     con = _db()
     try:
         if not store.member_by_token(con, rid, token):
             raise HTTPException(403, "bad token")
-        memory.forget(con, rid, key)
-        return {"forgotten": key.strip().lower()[:80]}
+        gone = memory.forget(con, rid, key)
+        return {"forgotten": key.strip().lower()[:80], "removed": gone}
     finally:
         con.close()
 
@@ -544,7 +1771,8 @@ def memory_fix(rid: str, token: str, key: str, value: str):
 async def rate_message(rid: str, mid: int, token: str, up: bool = True):
     con = _db()
     try:
-        if not store.member_by_token(con, rid, token):
+        me = store.member_by_token(con, rid, token)
+        if not me:
             raise HTTPException(403, "bad token")
         if store.room_locked(con, rid):
             raise HTTPException(403, "room locked")
@@ -554,11 +1782,27 @@ async def rate_message(rid: str, mid: int, token: str, up: bool = True):
             raise HTTPException(404, "no such message")
         except ValueError as e:
             raise HTTPException(400, str(e))
-        row = con.execute("SELECT kind FROM messages WHERE id=? AND room=?",
+        row = con.execute("SELECT kind, body FROM messages WHERE id=? AND room=?",
                           (mid, rid)).fetchone()
         is_card = bool(row and row["kind"] == "dissent")
+        note, sys_id = "", 0
+        if is_card:
+            try:
+                q = str(json.loads(row["body"] or "{}").get("question",
+                                                            ""))[:80]
+            except ValueError:
+                q = ""
+            word = "fair catch" if up else "false alarm"
+            note = f"{me['name']} closed dissent as {word}"
+            if q:
+                note += f": {q}"
+            sys_id = store.post_message(con, rid, "room", note,
+                                        kind="system")
     finally:
         con.close()
+    if is_card and note:
+        await _cast(rid, {"id": sys_id, "author": "room", "kind": "system",
+                          "body": note})
     popped = None
     if is_card:
         popped = await asyncio.to_thread(_pop_fresh, rid)
@@ -605,6 +1849,16 @@ def eval_strip(rid: str, token: str):
 
 @app.post("/rooms/{rid}/eval/exam")
 def eval_exam(rid: str, token: str, model: str = ""):
+    lock = _exam_locks.setdefault(rid, threading.Lock())
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "exam already running")
+    try:
+        return _eval_exam_locked(rid, token, model)
+    finally:
+        lock.release()
+
+
+def _eval_exam_locked(rid: str, token: str, model: str = ""):
     con = _db()
     try:
         me = store.member_by_token(con, rid, token)
@@ -654,6 +1908,8 @@ def mint_invites(rid: str, token: str, uses: int = 1, hours: int = 24):
         me = store.member_by_token(con, rid, token)
         if not _manage(me):
             raise HTTPException(403, "owner or operator only")
+        if store.room_parent(con, rid):
+            raise HTTPException(400, "side rooms seat from the main room")
         return store.mint_invite(con, rid, "member", uses, hours)
     finally:
         con.close()
@@ -738,9 +1994,21 @@ def room_state(rid: str, token: str):
         me = store.member_by_token(con, rid, token)
         if not me:
             raise HTTPException(403, "bad token")
+        row = con.execute("SELECT value FROM memory WHERE room=? AND key=?",
+                          (rid, "dissent_muted")).fetchone()
+        lrow = con.execute("SELECT value FROM memory WHERE room=? AND key=?",
+                           (rid, "dissent_last_run")).fetchone()
+        judge_last = None
+        if lrow:
+            try:
+                judge_last = json.loads(lrow["value"])
+            except ValueError:
+                judge_last = None
         return {"locked": store.room_locked(con, rid),
                 "model": me["model"] or "",
-                "default": S.SPARK_MODEL}
+                "default": S.SPARK_MODEL,
+                "dissent_muted": bool(row and row["value"] == "1"),
+                "judge_last": judge_last}
     finally:
         con.close()
 
@@ -913,8 +2181,35 @@ async def live(ws: WebSocket, rid: str, token: str):
             finally:
                 con.close()
             await _cast(rid, {"id": mid, "author": me["name"],
-                              "tag": tag, "badge": badge, "body": text})
+                              "tag": tag, "badge": badge, "body": text,
+                              "author_id": me["id"]})
             _spawn_judge(rid, S.SPARK_MODEL)
+            if "@" in text and not S.PAUSED:
+                con2 = _db()
+                try:
+                    mate, question = _find_mention(
+                        text, store.list_teammates(con2, rid))
+                    model_name = S.SPARK_MODEL
+                    iid = 0
+                    if mate:
+                        fresh = store.member_by_token(con2, rid, token)
+                        if fresh and fresh["model"]:
+                            model_name = fresh["model"]
+                        if not question:
+                            intro = (f"I'm {mate['name']}, {mate['role']}."
+                                     " Mention me with a question.")
+                            iid = store.post_message(
+                                con2, rid, mate["name"], intro,
+                                kind="answer", model=model_name)
+                finally:
+                    con2.close()
+                if mate and not question:
+                    await _cast(rid, {"id": iid, "author": mate["name"],
+                                      "kind": "answer", "body": intro})
+                elif mate:
+                    asyncio.get_running_loop().create_task(
+                        _teammate_later(rid, mate, question, model_name))
+            await _maybe_remind(rid)
     except WebSocketDisconnect:
         _live[rid].discard(ws)
         _live_who.pop(ws, None)

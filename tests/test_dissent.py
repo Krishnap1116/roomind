@@ -149,6 +149,7 @@ def test_live_socket_broadcasts(client, monkeypatch):
         ws.send_text("hello room")
         msg = ws.receive_json()
         assert msg["author"] == "Ana" and msg["body"] == "hello room"
+        assert msg["author_id"]
 
 
 def test_chat_broadcasts_before_judge_card(client, monkeypatch):
@@ -264,7 +265,9 @@ def test_second_card_queues_until_first_rated(client, monkeypatch):
                     params={"token": tok, "up": True})
     finally:
         web._live.pop(rid, None)
-    assert [p["kind"] for p in seen] == ["dissent"]  # next pops live
+    assert [p["kind"] for p in seen] == ["system", "dissent"]
+    assert "fair catch" in seen[0]["body"]  # history note first
+    # ...then next pops live
     msgs = client.get(f"/rooms/{rid}/messages",
                       params={"token": tok}).json()
     cards = [m for m in msgs if m["kind"] == "dissent"]
@@ -312,8 +315,9 @@ def test_pop_skips_stale_card(client, monkeypatch):
                     params={"token": tok, "up": True})
     finally:
         web._live.pop(rid, None)
-    assert len(seen) == 1
-    assert json.loads(seen[0]["body"])["question"] == "fresh claim here"
+    assert len(seen) == 2
+    assert seen[0]["kind"] == "system"  # history note first
+    assert json.loads(seen[1]["body"])["question"] == "fresh claim here"
     con = store.connect()
     assert dissent._read_queue(con, rid) == []
     con.close()
@@ -343,7 +347,7 @@ def test_rated_cards_hidden_on_page(client):
                                       "name": "O"}).json()
     page = client.get(f"/rooms/{j['room_id']}/app",
                       params={"token": j["token"]}).text
-    assert "if(!m.rating)showDissent(m,box2);" in page
+    assert "if(!m.rating)showDissent(m,document.getElementById('props'));" in page
 
 
 def test_judge_debounce_restarts(monkeypatch):
@@ -445,6 +449,21 @@ def test_severe_plus_evidence_fires_at_once(client, monkeypatch):
     assert r.json()["triggered"] is True  # severe skips the arm wait
 
 
+def test_severe_one_line_up_fires_at_once(client, monkeypatch):
+    def fake(api_key, base, model, history, prompt, timeout=60.0, notes=None):
+        return {"answer": json.dumps(CARD), "reasons": [], "remember": [],
+                "tin": 1, "tout": 1}
+
+    monkeypatch.setattr(web.meta, "spark_reply", fake)
+    rid, tok = _room(client)
+    con = store.connect()
+    store.post_message(con, rid, "Ana", "Ship it Friday, no review")
+    store.post_message(con, rid, "Ben", "yes lets do it")
+    con.close()
+    r = client.post(f"/rooms/{rid}/dissent/check", params={"token": tok})
+    assert r.json()["triggered"] is True  # ship in window, latest a nod
+
+
 def test_arm_expires_after_eight_messages(client, monkeypatch):
     def fake(api_key, base, model, history, prompt, timeout=60.0, notes=None):
         return {"answer": json.dumps(CARD), "reasons": [], "remember": [],
@@ -471,6 +490,17 @@ def test_judge_orders_cover_thin_verdicts_and_drift():
     assert "Fast agreement with reasons is silence" in dissent.JUDGE_PROMPT
     assert "up to 3 hats" in dissent.JUDGE_PROMPT
     assert "confidence" in dissent.JUDGE_PROMPT
+    assert "zero checkable reasons" in dissent.JUDGE_PROMPT
+    assert "broken rule" in dissent.JUDGE_PROMPT
+    assert "quote both" in dissent.JUDGE_PROMPT
+    assert "overrides rules 1 to 4" in dissent.JUDGE_PROMPT
+    assert "mere acknowledgment" in dissent.JUDGE_PROMPT
+    assert "fights the stated mission" in dissent.JUDGE_PROMPT
+    assert "confidence=high when your receipts quote" in dissent.JUDGE_PROMPT
+    assert "(5) the thread ignores" in dissent.JUDGE_PROMPT
+    assert "bare imperative" in dissent.JUDGE_PROMPT
+    assert "never whether it is safe" in dissent.JUDGE_PROMPT
+    assert "stated constraint" in dissent.JUDGE_PROMPT
 
 
 def test_low_confidence_arms_but_never_fires(client, monkeypatch):
@@ -578,7 +608,7 @@ def test_card_face_wiring(client):
     rid, otok = _room(client)
     page = client.get(f"/rooms/{rid}/app",
                       params={"token": otok}).text
-    assert "showDissent(m,box2)" in page  # cards arrive live now
+    assert "showDissent(m,document.getElementById('props'))" in page  # cards land in plan
     assert "memory/fix" in page
     assert "Room is right" in page
     assert "Fair catch" in page and "False alarm" in page
@@ -617,3 +647,109 @@ def test_verdicts_tighten_and_floor_holds(client, monkeypatch):
     con.close()
     r2 = client.post(f"/rooms/{rid}/dissent/check", params={"token": otok})
     assert r2.json()["triggered"] is True  # floor: severe always speaks
+
+
+def test_mute_route_toggles_and_state_shows(client):
+    rid, tok = _room(client)
+    state = lambda: client.get(f"/rooms/{rid}/state",
+                               params={"token": tok}).json()["dissent_muted"]
+    assert state() is False
+    r = client.post(f"/rooms/{rid}/dissent/mute",
+                    params={"token": tok, "on": True}).json()
+    assert r == {"muted": True}
+    assert state() is True
+    r = client.post(f"/rooms/{rid}/dissent/mute",
+                    params={"token": tok, "on": False}).json()
+    assert r == {"muted": False}
+    assert state() is False
+
+
+def test_judge_retries_malformed_reply_once(db, monkeypatch):
+    calls = []
+    prompts = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        prompts.append(a[4] if len(a) > 4 else k.get("prompt", ""))
+        if len(calls) == 1:
+            return {"answer": "not json {{{", "reasons": [],
+                    "remember": [], "tin": 1, "tout": 1}
+        return {"answer": json.dumps(CARD), "reasons": [],
+                "remember": [], "tin": 1, "tout": 1}
+
+    monkeypatch.setattr(dissent.meta, "spark_reply", flaky)
+    out = dissent.judge_line(lambda h, p: dissent.meta.spark_reply(
+        "", "", "", h, p), [], "M", {}, [], [])
+    assert out["fire"] is True
+    assert len(calls) == 2
+    assert prompts[1].endswith("Return ONLY the JSON object, no other words.")
+
+
+def test_judge_silent_after_two_bad_replies(db, monkeypatch):
+    calls = []
+
+    def broken(*a, **k):
+        calls.append(1)
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(dissent.meta, "spark_reply", broken)
+    out = dissent.judge_line(lambda h, p: dissent.meta.spark_reply(
+        "", "", "", h, p), [], "M", {}, [], [])
+    assert out["fire"] is False and out["decision"] is None
+    assert len(calls) == 2
+
+
+def test_judge_notes_last_run(client, monkeypatch):
+    monkeypatch.setattr(
+        dissent.meta, "spark_reply",
+        lambda *a, **k: {"answer": json.dumps(SILENT), "reasons": [],
+                         "remember": [], "tin": 1, "tout": 1})
+    rid, tok = _room(client)
+    con = store.connect()
+    store.post_message(con, rid, "Ana", "plain claim one")
+    con.close()
+    client.post(f"/rooms/{rid}/dissent/check", params={"token": tok})
+    row = store.connect().execute(
+        "SELECT value FROM memory WHERE room=? AND key='dissent_last_run'",
+        (rid,)).fetchone()
+    assert row and json.loads(row[0])["outcome"] == "silent"
+    st = client.get(f"/rooms/{rid}/state", params={"token": tok}).json()
+    assert st["judge_last"]["outcome"] == "silent"
+    client.post(f"/rooms/{rid}/dissent/mute",
+                params={"token": tok, "on": True})
+    client.post(f"/rooms/{rid}/dissent/check", params={"token": tok})
+    st = client.get(f"/rooms/{rid}/state", params={"token": tok}).json()
+    assert st["judge_last"]["outcome"] == "muted"
+
+
+def test_rate_dissent_posts_history_note(client, monkeypatch):
+    monkeypatch.setattr(web.meta, "spark_reply",
+                        lambda *a, **k: {"answer": json.dumps(CARD),
+                                         "reasons": [], "remember": [],
+                                         "tin": 1, "tout": 1})
+    rid, tok = _room(client)
+    con = store.connect()
+    store.post_message(con, rid, "Ana", "Ship it Friday, no review")
+    con.close()
+    assert client.post(f"/rooms/{rid}/dissent/check",
+                       params={"token": tok}).json()["triggered"] is True
+    msgs = client.get(f"/rooms/{rid}/messages",
+                      params={"token": tok}).json()
+    aid = [m for m in msgs if m["kind"] == "dissent"][0]["id"]
+    client.post(f"/rooms/{rid}/messages/{aid}/rate",
+                params={"token": tok, "up": True})
+    bodies = [m["body"] for m in client.get(
+        f"/rooms/{rid}/messages", params={"token": tok}).json()]
+    assert "Ana closed dissent as fair catch: Who ships it?" in bodies
+
+
+def test_rate_answer_stays_quiet(client):
+    rid, tok = _room(client)
+    con = store.connect()
+    aid = store.post_message(con, rid, "agent", "an answer", kind="answer")
+    con.close()
+    client.post(f"/rooms/{rid}/messages/{aid}/rate",
+                params={"token": tok, "up": True})
+    bodies = [m["body"] for m in client.get(
+        f"/rooms/{rid}/messages", params={"token": tok}).json()]
+    assert len(bodies) == 1  # thumbs never spam history

@@ -84,7 +84,8 @@ def test_members_list_open_but_crown_stays_owner_only(client):
     for marker in (">People</button>", ">Close room</button>", ">Step out</button>"):
         assert marker in owner_page
     assert ">People</button>" in guest_page
-    assert ">Close room</button>" not in guest_page
+    assert "dataset.r==='owner'" in guest_page
+    assert "Leave room</button>" in guest_page
     assert ">Step out</button>" in guest_page
     assert "if(ISOWNER)" in guest_page  # crown buttons gated in list
     mid = store.connect().execute(
@@ -95,7 +96,7 @@ def test_members_list_open_but_crown_stays_owner_only(client):
     assert client.post(f"/rooms/{rid}/owner",
                        params={"token": mtok,
                                "member_id": mid}).status_code == 403
-    assert owner_page.count("esc(m.nick)") == 2  # roster + picker
+    assert owner_page.count("esc(m.nick)") == 4  # people + leave + side pick + roster add
     assert "avatar(" not in owner_page  # colors gone, nicknames rule
 
 

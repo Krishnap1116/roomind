@@ -66,7 +66,12 @@ def test_ask_saves_and_reuses_memory(client, monkeypatch):
 
 
 def test_brief_shape_and_catchup_empty(client, monkeypatch):
-    def fake(api_key, base, model, history, prompt, timeout=60.0, notes=None):
+    seen = {}
+
+    def fake(api_key, base, model, history, prompt, timeout=60.0, notes=None,
+             effort=None, system=None):
+        seen["effort"] = effort
+        seen["system"] = system
         return {"answer": json.dumps({"decisions": [{"what": "x", "who": "A",
                                                      "why": "y"}],
                                       "open": [], "owners": {}}),
@@ -80,6 +85,8 @@ def test_brief_shape_and_catchup_empty(client, monkeypatch):
                       params={"name": "A", "invite": inv}).json()["token"]
     b = client.get(f"/rooms/{rid}/brief", params={"token": tok}).json()
     assert b["decisions"][0]["what"] == "x"
+    assert seen["effort"] == S.ASK_EFFORT  # summaries run fast, not deep
+    assert "exactly the JSON shape" in seen["system"]  # one boss, not two
 
     def boom(*a, **k):
         raise AssertionError("model must not be called")
@@ -88,3 +95,105 @@ def test_brief_shape_and_catchup_empty(client, monkeypatch):
     c = client.get(f"/rooms/{rid}/catchup",
                    params={"token": tok, "since_id": 9999}).json()
     assert c["summary"] == "Nothing new."
+
+
+def test_brief_extracts_json_from_chatter(client, monkeypatch):
+    inner = json.dumps({"decisions": [{"what": "x"}], "open": [],
+                        "owners": {}})
+
+    def fake(api_key, base, model, history, prompt, timeout=60.0,
+             notes=None, effort=None, system=None):
+        return {"answer": "Here you go:\n" + inner + "\nDone.",
+                "reasons": [], "remember": [], "tin": 1, "tout": 1}
+
+    monkeypatch.setattr(web.meta, "spark_reply", fake)
+    rid = client.post("/rooms", params={"mission": "M"}).json()["room_id"]
+    inv = store.connect().execute(
+        "SELECT token FROM invites WHERE room=?", (rid,)).fetchone()[0]
+    tok = client.post(f"/rooms/{rid}/join",
+                      params={"name": "A", "invite": inv}).json()["token"]
+    b = client.get(f"/rooms/{rid}/brief", params={"token": tok}).json()
+    assert b["decisions"][0]["what"] == "x"
+
+    def prose(api_key, base, model, history, prompt, timeout=60.0,
+              notes=None, effort=None, system=None):
+        return {"answer": "Just some words.", "reasons": [],
+                "remember": [], "tin": 1, "tout": 1}
+
+    monkeypatch.setattr(web.meta, "spark_reply", prose)
+    web.brief._CACHE.clear()
+    b = client.get(f"/rooms/{rid}/brief", params={"token": tok}).json()
+    assert b["summary"] == "Just some words."
+    assert b["decisions"] == []
+
+
+def test_brief_caps_lists_short(client, monkeypatch):
+    long = [{"what": f"d{i}"} for i in range(10)]
+
+    def fake(api_key, base, model, history, prompt, timeout=60.0,
+             notes=None, effort=None, system=None):
+        assert "At most 6 items" in prompt
+        return {"answer": json.dumps({"decisions": long,
+                                      "open": [f"o{i}" for i in range(10)],
+                                      "owners": {"A": [f"t{i}"
+                                                       for i in range(10)]}}),
+                "reasons": [], "remember": [], "tin": 1, "tout": 1}
+
+    monkeypatch.setattr(web.meta, "spark_reply", fake)
+    web.brief._CACHE.clear()
+    rid = client.post("/rooms", params={"mission": "M"}).json()["room_id"]
+    inv = store.connect().execute(
+        "SELECT token FROM invites WHERE room=?", (rid,)).fetchone()[0]
+    tok = client.post(f"/rooms/{rid}/join",
+                      params={"name": "A", "invite": inv}).json()["token"]
+    b = client.get(f"/rooms/{rid}/brief", params={"token": tok}).json()
+    assert len(b["decisions"]) == 6 and len(b["open"]) == 6
+    assert len(b["owners"]["A"]) == 6
+
+
+def test_brief_cached_until_room_changes(client, monkeypatch):
+    seen = {"n": 0}
+
+    def fake(api_key, base, model, history, prompt, timeout=60.0,
+             notes=None, effort=None, system=None):
+        seen["n"] += 1
+        return {"answer": json.dumps({"decisions": [], "open": [],
+                                      "owners": {}}),
+                "reasons": [], "remember": [], "tin": 1, "tout": 1}
+
+    monkeypatch.setattr(web.meta, "spark_reply", fake)
+    web.brief._CACHE.clear()
+    rid = client.post("/rooms", params={"mission": "M"}).json()["room_id"]
+    inv = store.connect().execute(
+        "SELECT token FROM invites WHERE room=?", (rid,)).fetchone()[0]
+    tok = client.post(f"/rooms/{rid}/join",
+                      params={"name": "A", "invite": inv}).json()["token"]
+    client.get(f"/rooms/{rid}/brief", params={"token": tok})
+    client.get(f"/rooms/{rid}/brief", params={"token": tok})
+    assert seen["n"] == 1  # same state, one model call
+    con = store.connect()
+    store.post_message(con, rid, "A", "more chat")
+    con.commit()
+    con.close()
+    client.get(f"/rooms/{rid}/brief", params={"token": tok})
+    assert seen["n"] == 2  # new chat, fresh summary
+
+
+def test_memory_keys_route_hides_internal(client):
+    j = client.post("/rooms", params={"mission": "M",
+                                      "name": "O"}).json()
+    rid, otok = j["room_id"], j["token"]
+    con = store.connect()
+    memory.remember(con, rid, "standup", "9am daily")
+    memory.remember(con, rid, "dissent_muted", "0")
+    memory.remember(con, rid, "dissent_armed", '{"mid": 254}')
+    memory.remember(con, rid, "dissent_cursor", "256")
+    memory.remember(con, rid, "last_dissent_mid", "254")
+    memory.remember(con, rid, "last_redteam_at", "1793778574.0")
+    memory.remember(con, rid, "dissent_last_run", '{"outcome": "silent"}')
+    con.close()
+    ks = client.get(f"/rooms/{rid}/memory",
+                    params={"token": otok}).json()
+    assert ks == [{"key": "standup", "value": "9am daily"}]
+    assert client.get(f"/rooms/{rid}/memory",
+                      params={"token": "bad"}).status_code == 403

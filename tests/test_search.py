@@ -99,6 +99,11 @@ def test_memory_lines_saved():
     assert out["remember"] == [{"key": "standup", "value": "9am daily"}]
 
 
+def test_memory_only_on_explicit_ask():
+    assert "ONLY when the user explicitly asks" in agent.LOOP_SYS
+    assert "Never volunteer MEMORY lines" in agent.LOOP_SYS
+
+
 def test_plain_text_is_final_not_a_loop():
     call, _ = _call(["just some words"])
     out = agent.run_loop(call, {"search": _boom, "weather": _boom}, "hi")
@@ -180,6 +185,26 @@ def test_open_page_strips_markup(monkeypatch):
 
     monkeypatch.setattr(agent.tools_mod.httpx, "get", boom)
     assert agent.tools_mod.open_page("https://example.com/s") == {}
+
+
+def test_open_page_sends_browser_headers(monkeypatch):
+    seen = {}
+
+    class Resp:
+        text = ("<html><head><title>T</title></head>"
+                "<body><p>hi</p></body></html>")
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, **kw):
+        seen.update(kw.get("headers", {}))
+        return Resp()
+
+    monkeypatch.setattr(agent.tools_mod.httpx, "get", fake_get)
+    agent.tools_mod.open_page("https://example.com/s")
+    assert "Mozilla" in seen["User-Agent"] and "Chrome" in seen["User-Agent"]
+    assert "text/html" in seen["Accept"]
 
 
 def test_parse_open_command():
@@ -496,3 +521,22 @@ def test_askstream_midstream_error_note(client, monkeypatch):
     msgs = client.get(f"/rooms/{rid}/messages",
                       params={"token": otok}).json()
     assert [m["kind"] for m in msgs] == ["ask"]  # question kept, no answer
+
+
+def test_final_strips_tool_chatter():
+    call, _ = _call(["FINAL Northridge is 15.7C. "
+                     "Sources: TOOL WEATHER Northridge"])
+    out = agent.run_loop(call, {"search": _boom, "weather": _boom},
+                         "temp?")
+    assert out["answer"] == "Northridge is 15.7C."
+    assert "TOOL" not in out["answer"]
+
+
+def test_final_strips_page_failure_talk():
+    call, _ = _call(["FINAL Mixed picture. Could not verify the Mayo "
+                     "text because page open failed. Sources: Yale."])
+    out = agent.run_loop(call, {"search": _boom, "weather": _boom},
+                         "summarize?")
+    assert "page open failed" not in out["answer"]
+    assert "Could not verify" not in out["answer"]
+    assert out["answer"] == "Mixed picture. Sources: Yale."

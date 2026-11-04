@@ -20,6 +20,16 @@ Open `http://localhost:8000`. Create a room, share the invite link, chat.
 Ask the agent anything. Watch reasons, briefs, dissent cards, and the
 dollar meter. Run tests: `python -m pytest -q`.
 
+## Room health and the eval harness
+
+The header shows live room health only: answer approval from thumbs,
+cost per decision, and a trust word. The golden
+harness — ten frozen transcripts the judge grades itself against —
+lives one click down in Room tab → Details, with a manual Run exam
+(costs ten judge calls). It scores 7–9 across runs with zero false
+alarms; every miss is conservative silence, never a wrong nudge. The
+bare-nod adoption case stays silent and is parked as a known limit.
+
 ## How a room works
 
 Messages append live for everyone. Agent answers carry checkable reasons

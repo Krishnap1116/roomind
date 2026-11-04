@@ -139,6 +139,45 @@ def test_manual_propose_door(client):
     assert client.post(f"/rooms/{rid}/proposals",
                        params={"token": tok, "what": "   "}
                        ).status_code == 400
+
+
+def test_manual_overlapping_proposal_replaces(client):
+    rid, tok = _room(client)
+    old = ("finish AI automation that makes the posts and post the posts"
+           " in instagram, facebook, you tube")
+    new = ("K does everything for AI automation for"
+           " Instagram/Facebook/YouTube posts")
+    p1 = client.post(f"/rooms/{rid}/proposals",
+                     params={"token": tok, "what": old,
+                             "who": "K, Z"}).json()
+    dup = client.post(f"/rooms/{rid}/proposals",
+                      params={"token": tok, "what": old,
+                              "who": "K"}).json()
+    assert dup["id"] == p1["id"]  # exact re-log replaces, still one card
+    assert len(client.get(f"/rooms/{rid}/proposals",
+                          params={"token": tok}).json()) == 1
+    p2 = client.post(f"/rooms/{rid}/proposals",
+                     params={"token": tok, "what": new,
+                             "who": "K"}).json()
+    assert p2["id"] == p1["id"]  # paraphrase replaces, never piles
+    assert p2["what"] == new and p2["who"] == "K"
+    assert len(client.get(f"/rooms/{rid}/proposals",
+                          params={"token": tok}).json()) == 1
+    client.post(f"/rooms/{rid}/proposals/{p1['id']}/confirm",
+                params={"token": tok})
+    assert len(client.get(f"/rooms/{rid}/ledger",
+                          params={"token": tok}).json()) == 1
+    p3 = client.post(f"/rooms/{rid}/proposals",
+                     params={"token": tok, "what": old,
+                             "who": "K, Z"}).json()
+    assert p3["id"] != p1["id"]  # stamped line reopens as a linked card
+    assert p3["updates"].startswith("L")
+    client.post(f"/rooms/{rid}/proposals/{p3['id']}/confirm",
+                params={"token": tok})
+    rows = client.get(f"/rooms/{rid}/ledger",
+                      params={"token": tok}).json()
+    assert len(rows) == 1  # confirm updated the stamped line, no pile
+    assert rows[0]["what"] == old
     assert client.post(f"/rooms/{rid}/proposals",
                        params={"token": "nope", "what": "x"}
                        ).status_code == 403
@@ -178,9 +217,9 @@ def test_proposal_face_wiring(client):
     assert "propConfirm" in page and "propDismiss" in page
     assert "Stamp it" in page
     assert "propNew" in page and "propCreate" in page
-    assert "Propose it" in page
-    assert "if(m.kind==='proposal'){propList();return;}" in page
-    assert page.index("id=side") < page.index("id=props")  # cards below chat
+    assert "New decision" in page
+    assert "if(m.kind==='proposal'){propList();ping('plan');return;}" in page
+    assert page.index("id=side") < page.index("id=props")  # chat pane before plan
     assert "Updates: " in page and "edit to sharpen" in page
 
 
@@ -274,6 +313,37 @@ def test_confirm_updates_stamped_ledger(client, monkeypatch):
     assert "updated: Ship Saturday" in msgs[-1]["body"]
 
 
+def test_confirm_with_deadline_stays_quiet(client):
+    rid, tok = _room(client)
+    pid = client.post(f"/rooms/{rid}/proposals",
+                      params={"token": tok, "what": "Ship Friday",
+                              "who": "Ana", "deadline": "Friday"}).json()["id"]
+    seen = []
+
+    class Fake:
+        async def send_json(self, p):
+            seen.append(p)
+
+    web._live[rid] = {Fake()}
+    try:
+        client.post(f"/rooms/{rid}/proposals/{pid}/confirm",
+                    params={"token": tok})
+    finally:
+        web._live.pop(rid, None)
+    assert [p["kind"] for p in seen] == ["system", "proposal"]
+
+
+def test_dismiss_posts_history_note(client):
+    rid, tok = _room(client)
+    pid = client.post(f"/rooms/{rid}/proposals",
+                      params={"token": tok, "what": "Ship Friday"}).json()["id"]
+    assert client.post(f"/rooms/{rid}/proposals/{pid}/dismiss",
+                       params={"token": tok}).json() == {"dismissed": pid}
+    bodies = [m["body"] for m in client.get(
+        f"/rooms/{rid}/messages", params={"token": tok}).json()]
+    assert "Ana dismissed: Ship Friday" in bodies
+
+
 def test_vague_decision_flagged(db, monkeypatch):
     vague = dict(SILENT_DEC, decision={"what": "K to concentrate on this",
                                        "who": "K", "why": "", "deadline": "",
@@ -287,3 +357,6 @@ def test_vague_decision_flagged(db, monkeypatch):
     con.close()
     assert "updates" in dissent.JUDGE_PROMPT
     assert "needs_detail" in dissent.JUDGE_PROMPT
+    assert "Need-plus-agreement proposes" in dissent.JUDGE_PROMPT
+    assert "INCLUDING the agent ask/answer lines" in dissent.JUDGE_PROMPT
+    assert "no decision beats a guessed one" in dissent.JUDGE_PROMPT

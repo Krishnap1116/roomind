@@ -80,7 +80,8 @@ def test_operator_page_sees_links_not_crown(client):
     page = client.get(f"/rooms/{rid}/app",
                       params={"token": mtok}).text
     assert ">Team link</button>" in page
-    assert ">Close room</button>" not in page
+    assert "dataset.r==='owner'" in page
+    assert "Leave room</button>" in page
     assert ">People</button>" in page
 
 

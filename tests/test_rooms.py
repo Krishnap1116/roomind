@@ -101,3 +101,26 @@ def test_dotenv_loads_without_overriding(tmp_path, monkeypatch):
     assert os.environ["ROOMIND_T_B"] == "fromenv"  # env wins
     assert S._parse_dotenv("NODATA\n=novalue\n") == {}
     S._load_dotenv(str(tmp_path / "missing"))  # no crash without file
+
+
+def test_messages_ask_id_column_migrates_old_db(tmp_path):
+    import sqlite3
+
+    p = str(tmp_path / "old.db")
+    con = sqlite3.connect(p)
+    con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY,"
+                " room TEXT, author TEXT, kind TEXT, model TEXT,"
+                " body TEXT, reasons TEXT, author_id TEXT, rating INT,"
+                " re TEXT, created_at REAL)")
+    con.commit()
+    con.close()
+    con = store.connect(p)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(messages)")]
+    assert "ask_id" in cols and "re" not in cols
+    qid = store.post_message(con, "r", "O", "hi?", kind="ask")
+    aid = store.post_message(con, "r", "agent", "ok", kind="answer",
+                             ask_id=qid)
+    row = con.execute("SELECT ask_id FROM messages WHERE id=?",
+                      (aid,)).fetchone()
+    assert row[0] == qid
+    con.close()

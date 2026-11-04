@@ -117,3 +117,22 @@ def test_creator_walks_straight_in(client):
     rows = client.get(f"/rooms/{j['room_id']}/invites",
                       params={"token": j["token"]}).json()
     assert rows == []
+
+
+def test_join_errors_tell_room_from_invite(client):
+    j = client.post("/rooms", params={"mission": "M",
+                                      "name": "Owner"}).json()
+    rid, otok = j["room_id"], j["token"]
+    team = client.post(f"/rooms/{rid}/invites",
+                       params={"token": otok, "uses": 5}).json()["invite"]
+    r = client.post("/rooms/deadbeef/join",
+                    params={"name": "X", "invite": team})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "no such room"
+    r = client.post(f"/rooms/{rid}/join",
+                    params={"name": "X", "invite": "wrong"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "bad or expired invite"
+    r = client.post(f"/rooms/{rid}/join",
+                    params={"name": "Spacy", "invite": f"  {team}  "})
+    assert r.status_code == 200  # pasted whitespace never blocks entry
