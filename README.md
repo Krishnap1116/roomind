@@ -1,6 +1,6 @@
-# Roomind — shared AI rooms where teams and agents work live 🏆
+# Roomind — shared AI rooms where teams and agents work live
 
-> 🎥 Demo video: link coming after recording (Nov 4)
+> Demo video: link coming after recording (Nov 4)
 
 *Start solo like any AI chat. Hit Share, and the same chat becomes a live room: teammates and agents, one memory, a referee that speaks only with evidence, and a receipt for every decision — all priced on screen.*
 
@@ -55,10 +55,7 @@ Open a solo chat. The moment you need people, Share mints invites and the *same*
 - **Frontend:** fast single-file web UI, no build step.
 - **Models:** Muse Spark via Meta Model API (1.3 default, 1.2/1.1 per member).
 - **Data APIs:** Tavily web search, Open-Meteo weather (keyless).
-
-## Why Meta's models matter here
-
-Every answer, memory decision, brief, dissent verdict, red-team attack, and teammate reply is a Muse Spark call — long-context reasoning over live threads plus strict JSON verdicts the referee pipeline parses. The product *is* the model, applied to group reasoning.
+- **Why Spark:** long-context reasoning over live threads plus strict-JSON verdicts the referee pipeline parses — every answer, memory decision, brief, dissent card, red-team attack, and teammate reply is a Spark call.
 
 ## Getting Started
 
