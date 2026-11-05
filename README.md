@@ -1,6 +1,6 @@
 # Roomind — shared AI rooms where teams and agents work live
 
-> Demo video: link coming after recording (Nov 4)
+> Demo video: https://www.youtube.com/watch?v=TtOO0cJjn_s
 
 *Start solo like any AI chat. Hit Share, and the same chat becomes a live room: teammates and agents, one memory, a referee that speaks only with evidence, and a receipt for every decision — all priced on screen.*
 
