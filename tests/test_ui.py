@@ -182,7 +182,7 @@ def test_room_tabs_and_plain_labels(client):
                    "renderCheck(", "u.by_model", "memKeys()",
                    "id=memkeys", "Remembers:",
                    "<b>Decisions</b>", "<b>For you</b>", "<b>Open</b>",
-                   "forgetKeyBy(", "no such fact", "memToggle()",
+                   "forgetKeyBy(", "memToggle()",
                    "more</button>", "resultBox(", "class=result",
                    "class=rhead", "resultBox('Summary',",
                    "resultBox('Decisions',", "resultBox('Team',",
@@ -201,7 +201,7 @@ def test_room_tabs_and_plain_labels(client):
                    "mutebadge", "Judge listening", "judgestate",
                    "kind==='muted'", "Already settled by someone",
                    "_wsWasOpen", "Approval: ", "/decision",
-                   "Trust: ", "Details ›", "detailslink",
+                   "Trust: ", "detailslink",
                    "Exam never run.", ".msg.sys", "sys?' sys'",
                    "Exam already running", "_examRun",
                    "Precision ", "Recall ",
@@ -260,7 +260,6 @@ def test_room_tabs_and_plain_labels(client):
     assert page.index("id=workout") < page.index("id=rems")
     assert page.index("id=tab-room") < page.index("id=roomout")
     assert page.index("id=roomout") < page.index("id=tab-share")
-    assert page.index("id=roomout") < page.index("id=fk")
 
 
 def test_share_tab_member_note(client):

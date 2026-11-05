@@ -206,7 +206,7 @@ def test_trust_words_follow_verdicts(client):
     assert e()["word"] == "muted"
     page = client.get(f"/rooms/{rid}/app",
                       params={"token": otok}).text
-    assert "Trust: '+e.trust.word" in page
+    assert "Trust: '+tr.word" in page  # trust lives in Details panel, not the strip
 
 
 def _suite_case(cid, must, body):

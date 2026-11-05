@@ -238,9 +238,9 @@ padding:.3em .55em}}
 .rtitle{{display:flex;flex-direction:column;min-width:0;line-height:1.3}}
 .rtitle b{{font-size:1.02em;letter-spacing:-.01em;white-space:nowrap;
 overflow:hidden;text-overflow:ellipsis}}
-#strip{{flex-basis:100%;font-family:'JetBrains Mono',ui-monospace,monospace;
+#strip{{margin-left:auto;font-family:'JetBrains Mono',ui-monospace,monospace;
 font-size:.78em;background:var(--acc-t);border:1px solid #CBE3D6;color:var(--acc-d);
-border-radius:12px;padding:.45em 1em;cursor:pointer;
+border-radius:12px;padding:.45em 1em;white-space:nowrap;
 font-variant-numeric:tabular-nums}}
 .detailslink{{text-decoration:underline;font-weight:700}}
 #strip:hover{{background:#DDF0E5}}
@@ -307,8 +307,6 @@ border-color:var(--danger)}}}}
 #remindtime{{max-width:9em}}
 #sideinput{{flex:1;min-width:8em}}
 .dim{{color:var(--mut);font-size:.9em}}
-.forgetrow{{display:flex;gap:.5em;padding:0 1em .6em}}
-.forgetrow input{{flex:1}}
 #planout,#workout,#roomout{{padding:0 1em;font-size:.92em}}
 #planout:empty,#workout:empty,#roomout:empty,#invout:empty{{padding:0}}
 #invout{{padding:0 1em;font-size:.92em}}
@@ -344,9 +342,8 @@ padding:.55em .8em;margin:.5em 0;animation:rise .25s cubic-bezier(.16,1,.3,1)}}
 .msg .rate button{{font-size:.8em;padding:.25em .6em}}
 .card{{background:#fff;border:1px solid var(--line);border-radius:12px;
 padding:.7em .9em;margin:.55em 0;animation:rise .25s cubic-bezier(.16,1,.3,1)}}
-.card.dissent{{background:var(--amber-t);border-color:#EAD9A6;
-border-left:4px solid var(--amber)}}
-.card.prop{{border-left:4px solid var(--acc)}}
+.card.dissent{{background:var(--amber-t);border-color:#D9C48A}}
+.card.prop{{background:var(--acc-t);border-color:#CBE3D6}}
 .card.done{{opacity:.55}}
 .card .meta{{font-size:.9em;color:var(--mut)}}
 .card button{{font-size:.85em;padding:.4em .7em;margin:.3em .3em 0 0}}
@@ -362,6 +359,7 @@ background:var(--acc);margin-right:.25em;animation:bl 1s infinite}}
 ::-webkit-scrollbar-thumb{{background:#D6D0C4;border-radius:8px;
 border:2px solid var(--bg)}}
 ::-webkit-scrollbar-track{{background:transparent}}
+::selection{{background:#CBE3D6}}
 @media(max-width:900px){{#wrap{{flex-direction:column;overflow-y:auto}}
 #agentcol{{min-height:72dvh;flex:none}}
 #roomcol{{overflow:visible}}
@@ -387,7 +385,7 @@ animation-duration:.01ms!important;transition-duration:.01ms!important}}}}
 <button id=menu onclick='toggleBar()' aria-label='Menu' title='Menu'>☰</button>
 <div class=rtitle><b>{mission_e}</b></div>
 {parent_html}{side_html}
-<div id=strip onclick='evalPanel()' title='Open eval breakdown and exam'>…</div>
+<div id=strip>…</div>
 </header>
 <div id=wrap>
 <section id=agentcol>
@@ -482,7 +480,6 @@ animation-duration:.01ms!important;transition-duration:.01ms!important}}}}
 <button onclick="location='/'">Step out</button>
 <button class=quiet onclick='leaveRoom()'>Leave</button>
 </div>
-<div class=forgetrow><input id=fk placeholder='Forget fact key'><button class=quiet onclick='forgetKey()'>Forget</button></div>
 <p class=dim id=memkeys></p>
 </div>
 <div id=tab-share class=tabpane>
@@ -1248,13 +1245,6 @@ async function memKeys(){{const el=document.getElementById('memkeys');
 async function forgetKeyBy(el){{
   await fetch('/rooms/'+R+'/memory?token='+T+'&key='+encodeURIComponent(el.dataset.k),
   {{method:'DELETE'}});memKeys();}}
-async function forgetKey(){{const k=document.getElementById('fk').value.trim();
-  if(!k){{alert('Type the fact key shown under Remembers, or click its × button.');return;}}
-  const r=await fetch('/rooms/'+R+'/memory?token='+T+'&key='+encodeURIComponent(k),
-  {{method:'DELETE'}});
-  const j=await r.json();
-  alert(j.removed?'forgotten':'no such fact — click the × next to it under Remembers.');
-  document.getElementById('fk').value='';memKeys();}}
 async function evalBar(){{try{{
   const r=await fetch('/rooms/'+R+'/eval?token='+T);
   if(!r.ok)return;
@@ -1262,9 +1252,6 @@ async function evalBar(){{try{{
   const ap=e.approval;
   const pc=v=>v==null?'—':Math.round(v*100)+'%';
   let h='Approval: '+(ap.n?pc(ap.pct)+' ('+ap.n+' votes)':'—');
-  h+=' · Cost: '+(e.cost_per_decision==null?'—':'$'+e.cost_per_decision.toFixed(3)+'/decision');
-  h+=' · Trust: '+e.trust.word;
-  h+=' · <span class=detailslink>Details ›</span>';
   document.getElementById('strip').innerHTML=h;
 }}catch(_){{}}}}
 async function evalPanel(){{const r=await fetch('/rooms/'+R+'/eval?token='+T);
@@ -1325,10 +1312,13 @@ async function state(){{
     }}catch(_){{
       window._models=[];
     }}}}
+    const shortM=m=>{{return String(m||'').split('-')
+      .map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' ');}};
     const opts=[cur].concat(
       (window._models||[]).filter(m=>m&&m!==cur));
-    sel.innerHTML=opts.map(m=>"<option value='"+esc(m)+"'>"+esc(m)
-      +"</option>").join('')+"<option value='__other__'>Other…</option>";
+    sel.innerHTML=opts.map(m=>"<option value='"+esc(m)+"'>"
+      +esc(shortM(m))+"</option>").join('')
+      +"<option value='__other__'>Other…</option>";
     sel.value=cur;}}}}
 async function setModel(v){{
   if(v==='__other__'){{v=prompt('Model id (same key must allow it):')||'';}}
