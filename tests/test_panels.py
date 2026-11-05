@@ -103,7 +103,6 @@ def test_solo_face_hides_chat_and_links(client):
     assert "const ISSOLO=true" in solo
     assert "getElementById('chatrow')" in solo
     assert "button[onclick='links()']" in solo
-    assert "button[onclick='catchup()']" in solo
     assert "button[onclick='check()']" not in solo
     assert "button[onclick^='invite(']" in solo
     assert "getElementById('uses')" in solo

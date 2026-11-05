@@ -24,7 +24,7 @@ Open a solo chat. The moment you need people, Share mints invites and the *same*
 - Streaming answers with Sources and checkable reasons (Tavily search, full-page reads, Open-Meteo weather).
 
 **Memory**
-- Remember/recall via chat; forget with one × per fact; briefs; per-person catch-up.
+- Remember/recall via chat; forget with one × per fact; one-click briefs.
 
 **Referee (dissent)**
 - Evidence-only cards on rushed or rule-breaking agreement, with quoted receipts.

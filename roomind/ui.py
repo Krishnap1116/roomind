@@ -411,7 +411,6 @@ animation-duration:.01ms!important;transition-duration:.01ms!important}}}}
 <div class=tools>
 <button class=primary onclick='brief()'>Summary</button>
 <label><input type=checkbox id=incside> Include sides</label>
-<button onclick='catchup()' title='What you missed since you last looked'>Catch me up</button>
 </div>
 <div class=sech>Decisions</div>
 <div class=tools>
@@ -502,7 +501,6 @@ const ISSOLO={issolo};
 if(ISSOLO){{document.getElementById('chatrow').style.display='none';
   const u=document.getElementById('uses');if(u)u.style.display='none';
   document.querySelectorAll("button[onclick='links()'],button[onclick='people()'],"
-    +"button[onclick='catchup()'],"
     +"button[onclick='lockRoom()'],button[onclick='remindNow()'],"
     +"button[onclick^='invite('],input#remindtime,#sidesec")
     .forEach(b=>b.style.display='none');}}
@@ -1083,17 +1081,6 @@ async function brief(){{document.getElementById('planout').innerHTML='Briefing�
   const inc=document.getElementById('incside').checked?'&include_sides=true':'';
   const r=await fetch('/rooms/'+R+'/brief?token='+T+inc);
   document.getElementById('planout').innerHTML=resultBox('Summary',renderBrief(await r.json()));}}
-function renderCatchup(j){{let h=j.summary?'<p>'+esc(j.summary)+'</p>':'';
-  if((j.decisions||[]).length)h+='<p><b>Decisions</b></p>';
-  (j.decisions||[]).forEach(d=>{{h+='<p>• <b>'+esc(d.what||'')+'</b>'
-    +(d.who?' — '+esc(d.who):'')+'</p>';}});
-  if((j.for_you||[]).length)h+='<p><b>For you</b></p>';
-  (j.for_you||[]).forEach(f=>{{h+='<p>→ '+esc(f)+'</p>';}});
-  return h||'<p class=dim>Nothing new.</p>';}}
-async function catchup(){{document.getElementById('planout').innerHTML='Catching up…';
-  const r=await fetch('/rooms/'+R+'/catchup?token='+T
-  +'&since_id='+_seen);
-  document.getElementById('planout').innerHTML=resultBox('Catch-up',renderCatchup(await r.json()));}}
 function renderLedger(rows){{if(!rows||!rows.length)
     return '<p class=dim>No stamped decisions yet.</p>';
   return rows.map(l=>'<p>• <b>'+esc(l.what||'')+'</b>'

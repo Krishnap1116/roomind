@@ -392,5 +392,4 @@ def test_slow_doors_show_working_state(client):
     page = client.get(f"/rooms/{rid}/app",
                       params={"token": otok}).text
     assert "Briefing…" in page
-    assert "Catching up…" in page
     assert "Judging the thread…" in page
