@@ -14,16 +14,40 @@ Shared AI chats are read-only: you can send someone your Claude or ChatGPT threa
 
 Open a solo chat. The moment you need people, Share mints invites and the *same* chat becomes a room: every member chats and asks, the agent answers everyone, one memory serves the team, a dissent referee cards thin agreements, stamped decisions land in a ledger, side rooms split off and report back — and a meter prices every model call.
 
-## Core Features
+## Features
 
-- Solo-first agent chat with live web search, full-page reads, and weather.
-- One-click Share: invites, nicknames, operators, per-member model choice.
-- Room memory: remember/recall/forget, briefs, catch-up.
-- Dissent referee: evidence-only cards on rushed agreement, manual challenge, mute.
-- Decision ledger with editable stamps, reminders, tasks, artifacts, polls.
-- Side rooms with member-only rosters and share-back reports.
-- Red-team attacks, teammate agents (@Researcher/@Planner/@Critic), away tasks.
-- Measured everything: per-model spend, approval, cost per decision, trust.
+**Rooms & chat**
+- Solo-first: start alone with the agent, Share when you need people.
+- Single + team invite links with live joined/left counts and +5 seat top-up.
+- Unique nicknames per seat; per-member model choice (your pick, your meter).
+- Live chat plus ask/answer slots — each answer lands under its own question.
+- Streaming answers with Sources and checkable reasons (Tavily search, full-page reads, Open-Meteo weather).
+
+**Memory**
+- Remember/recall via chat; forget with one × per fact; briefs; per-person catch-up.
+
+**Referee (dissent)**
+- Evidence-only cards on rushed or rule-breaking agreement, with quoted receipts.
+- Manual "Challenge us", mute with a room-wide badge, expert hats per card.
+
+**Decisions & work**
+- Editable proposal cards; stamped decision ledger (overlaps replace, never pile).
+- Tasks (assignee + due + Done), versioned docs (draft → propose → approve), live polls, daily reminders with popups (ledger deadlines mirror automatically).
+
+**Side rooms**
+- Split off a picked subgroup (one level); member-only roster; one-click share-back lands in main chat and as one ledger row.
+
+**Teammates & red-team**
+- @Researcher/@Planner/@Critic answer when mentioned; add/rename/remove your own.
+- Away tasks run in the background and land in chat plus under the done task.
+- Red-team attacks with ranked flaws, severity, Holds line, and cooldown.
+
+**Running & publishing**
+- Owner/operator/member roles, kick, room lock, step out, leave, ownership transfer, close forever.
+- Full JSON export (sides included or counted hidden), revokable read-only showcase link.
+
+**Measured**
+- Sidebar meter: per-model spend plus room cap; header shows live approval from thumbs.
 
 ## Tech Stack
 
@@ -54,7 +78,7 @@ Every answer, memory decision, brief, dissent verdict, red-team attack, and team
 
 ## Room health and the eval harness
 
-The header shows live room health only: answer approval from thumbs, cost per decision, and a trust word. The golden harness — ten frozen transcripts the judge grades itself against — lives one click down in Room tab → Details, with a manual Run exam (ten judge calls). It scores 7–9 across runs with zero false alarms; every miss is conservative silence. The bare-nod adoption case stays silent and is parked as a known limit.
+The header shows live approval from thumbs; spend lives in the sidebar meter. Behind the API sits the golden harness — ten frozen transcripts the judge grades itself against via Run exam (ten judge calls). It scores 7–9 across runs with zero false alarms; every miss is conservative silence. The bare-nod adoption case stays silent and is parked as a known limit.
 
 ## New-work proof
 
